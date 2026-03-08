@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Verify tests pass on release tag ─────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - run: make test-unit
+
+  # ── Verify VERSION matches git tag ────────────────────────────────────────
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check VERSION matches tag
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          FILE_VERSION="$(cat VERSION | tr -d '[:space:]')"
+          echo "tag=$TAG_VERSION file=$FILE_VERSION"
+          [ "$TAG_VERSION" = "$FILE_VERSION" ] || { echo "✗ VERSION ($FILE_VERSION) does not match tag ($TAG_VERSION)"; exit 1; }
+          echo "✓ VERSION matches tag"
+
+  # ── GitHub Release with CHANGELOG excerpt ────────────────────────────────
+  create-release:
+    runs-on: ubuntu-latest
+    needs: [test, verify-version]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract changelog for this version
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          sed -n "/^## \[$VERSION\]/,/^## \[/p" CHANGELOG.md | sed '$d' > release_notes.txt
+          echo "--- Release notes ---"
+          cat release_notes.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          body_path: release_notes.txt
+          name: "posthog-zig v${{ github.ref_name }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Publish zig package (zig fetch verification) ──────────────────────────
+  verify-fetchable:
+    runs-on: ubuntu-latest
+    needs: create-release
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Verify package is fetchable
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          mkdir /tmp/fetch-test && cd /tmp/fetch-test
+          cat > build.zig.zon << EOF
+          .{
+              .name = .@"fetch-test",
+              .version = "0.0.1",
+              .dependencies = .{
+                  .posthog = .{
+                      .url = "https://github.com/usezombie/posthog-zig/archive/refs/tags/$TAG.tar.gz",
+                  },
+              },
+              .paths = .{ "build.zig.zon" },
+          }
+          EOF
+          zig fetch --save https://github.com/usezombie/posthog-zig/archive/refs/tags/$TAG.tar.gz
+          echo "✓ package fetchable via zig fetch"
