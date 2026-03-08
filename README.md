@@ -2,19 +2,18 @@
 
 [![ci](https://github.com/usezombie/posthog-zig/actions/workflows/ci.yml/badge.svg)](https://github.com/usezombie/posthog-zig/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/usezombie/posthog-zig/branch/main/graph/badge.svg)](https://codecov.io/gh/usezombie/posthog-zig)
-[![version](https://img.shields.io/github/v/release/usezombie/posthog-zig?label=version)](https://github.com/usezombie/posthog-zig/releases)
+[![version](https://img.shields.io/github/v/tag/usezombie/posthog-zig?label=version&sort=semver)](https://github.com/usezombie/posthog-zig/tags)
 [![zig](https://img.shields.io/badge/zig-0.15.x-orange)](https://ziglang.org)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 A server-side PostHog analytics client for Zig. Non-blocking event capture with background batch delivery, retry, and graceful shutdown.
 
-**Version:** 0.1.0
 **Zig:** 0.15.x
 **PostHog API:** `/batch/` (capture) + `/decide/` v3 (feature flags)
 
 ---
 
-## What's in v0.1
+## What is here
 
 | Feature | API | Notes |
 |---|---|---|
@@ -38,29 +37,21 @@ A server-side PostHog analytics client for Zig. Non-blocking event capture with 
 | Zig panic (unhandled) | Queue lost — no delivery |
 | OOM during flush | Retry up to `max_retries`, then drop |
 
-**v0.1 is best-effort.** For handled application errors — a caught `error.NotFound`,
-a failed DB query — the queue path is fine; the process is healthy and the flush
-thread is alive. For true crashes (allocator corruption, unhandled panic) queued
-events may not be delivered.
+Delivery is best-effort for crash scenarios. For handled application errors
+(for example, a caught `error.NotFound` or a failed DB query), the process is
+healthy and the queue/flush path remains reliable.
 
-**v0.2 will add crash-safe delivery:** `captureException` with `level == .fatal`
+**Upcoming release will add crash-safe delivery:** `captureException` with `level == .fatal`
 will write a crash file to disk synchronously (no allocator, one `write()` syscall),
 delivered on next startup. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for
 the full design.
-
-## What's not in v0.1
-
-- Crash file / disk-backed fatal delivery (v0.2) — see delivery guarantees above
-- Super properties / global property middleware (v0.2)
-- WASM / embedded targets — requires OS threads and `std.http.Client`
-- Session recording, autocapture — browser-only, use posthog-js
 
 ---
 
 ## Install
 
 ```bash
-zig fetch --save https://github.com/usezombie/posthog-zig/archive/refs/tags/v0.1.0.tar.gz
+zig fetch --save https://github.com/usezombie/posthog-zig/archive/refs/tags/<tag>.tar.gz
 ```
 
 `build.zig`:
@@ -143,9 +134,7 @@ defer if (payload) |p| allocator.free(p); // caller owns the returned slice
 try client.flush();
 ```
 
----
-
-## Integration pattern for calling systems
+### Integration patterns for calling systems
 
 posthog-zig is a library. It cannot install a panic handler. The calling application
 owns that responsibility.
@@ -177,11 +166,11 @@ pub fn main() !void {
 // Zig calls this on unhandled panics.
 // Keep it minimal — the allocator may be corrupted.
 pub fn panic(msg: []const u8, trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
-    // v0.1: best-effort. If the flush thread is still alive it may deliver
+    // Current behavior: best-effort. If the flush thread is still alive it may deliver
     // events already in the queue. Do not attempt to enqueue new events here —
     // the allocator state is unknown.
 
-    // v0.2: ph_client.writeCrashFile() will be safe here (zero allocation,
+    // Upcoming release: ph_client.writeCrashFile() will be safe here (zero allocation,
     // single write() syscall of the arena buffer). Not implemented yet.
 
     std.debug.defaultPanic(msg, trace, ret_addr);
@@ -221,48 +210,7 @@ if (ctx.posthog) |*ph| {
 
 The `catch {}` is intentional: analytics must never propagate errors to the caller.
 
----
-
-## Design
-
-### Non-blocking hot path
-
-`capture()`, `identify()`, `group()`, and `captureException()` serialize the event
-into the write-side arena and return. No per-event heap allocation, no I/O, no blocking.
-The flush thread swaps arenas (O(1) under mutex) and owns all network activity.
-
-```
-capture() ──► write arena ──► swap (O(1)) ──► flush thread ──► POST /batch/
- < 1μs        (mutex lock)    (flush fires)   owns flush arena   (std.http.Client)
-               enqueue                         POST all events    │
-               return         new capture()    arena.reset()      └─ retry on 5xx/429
-                              writes to        (one free, O(1))   └─ drop after max_retries
-                              other arena
-```
-
-**Memory model — double-buffer arena.** Two `ArenaAllocator` instances alternate roles.
-After each flush, `arena.reset()` reclaims all event memory in one operation regardless
-of batch size. Fixed memory footprint: `2 × max_queue_size × avg_event_size` (~4MB at
-defaults). No per-event malloc/free, no heap fragmentation.
-
-**Overflow.** When the write-side arena is at capacity, new events are dropped (drop-newest)
-and counted. The next flush cycle resets the arena and restores full capacity.
-
-### Retry policy
-
-- Retries on: 5xx, 429, network errors
-- Does not retry on: 4xx (except 429) — bad data, logged and dropped
-- Backoff: `min(1s * 2^attempt, 30s)` + random jitter 0–500ms
-
-### Feature flag cache
-
-`/decide/` responses are cached per `distinct_id` with a 60s TTL and an LRU cap of 1000 entries. After the first call, `isFeatureEnabled()` returns from cache without hitting the network.
-
-### Shutdown
-
-`client.deinit()` signals the flush thread to stop accepting new events, performs a final `POST /batch/` of the remaining queue, and joins the thread (unbounded wait in v0.1 — see `shutdown_flush_timeout_ms` in Configuration). Events that cannot be delivered are logged and dropped — they are not persisted to disk.
-
-For deeper design rationale — memory model, crash delivery tradeoffs, v0.2 double-buffer arena target, and serialization approach — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+For deeper design rationale — memory model, crash delivery tradeoffs, and serialization approach — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 
@@ -277,7 +225,7 @@ For deeper design rationale — memory model, crash delivery tradeoffs, v0.2 dou
 | `flush_at` | `20` | Flush when this many events are queued |
 | `max_queue_size` | `1000` | Queue capacity; drops newest on overflow |
 | `max_retries` | `3` | Max delivery attempts per batch |
-| `shutdown_flush_timeout_ms` | `5_000` | Reserved for v0.2 — `deinit()` blocks until the flush thread joins (unbounded in v0.1) |
+| `shutdown_flush_timeout_ms` | `5_000` | Reserved for timed join support in a future release; currently `deinit()` blocks until the flush thread joins |
 | `feature_flag_ttl_ms` | `60_000` | Feature flag cache TTL per distinct_id |
 
 ---
@@ -301,17 +249,11 @@ zig build -Dtarget=x86_64-linux --summary all 2>&1 | grep "link with" && echo "W
 zig build bench
 
 # Coverage report (requires kcov: brew install kcov / apt-get install kcov)
-make test-coverage
+make coverage
 
 # Memory leak gate (valgrind on Linux, leaks on macOS)
 make memleak
 ```
-
----
-
-## Disclaimer
-
-This is a **server-side SDK**. It assumes `std.http.Client`, `std.Thread`, and a real OS. It does not support browser WASM, session recording, or autocapture. For frontend analytics, use [posthog-js](https://github.com/PostHog/posthog-js).
 
 ---
 
