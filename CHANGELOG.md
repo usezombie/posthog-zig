@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-03-08
+
+### Changed
+
+- CI workflow now runs on pull requests only (`lint`, `test`, `coverage`, `cross-compile`), avoiding duplicate reruns on merge to `main`
+- Release workflow now runs on tag pushes only and performs its own sequential gates (`verify-version` -> `lint` -> `test` -> `cross-compile` -> `coverage`) before publishing
+- Coverage make target renamed from `test-coverage` to `coverage`; removed `test-depth` gate
+- Documentation streamlined: removed hardcoded README version text, simplified usage/architecture sections, and reduced version-specific maintenance text
+
+### Fixed
+
+- `verify-fetchable` now creates a deterministic temp workspace and valid Zig project files before `zig fetch --save`
+- `build.zig.zon` package name in smoke test now uses a valid bare Zig identifier (`.fetch_test`)
+- Release workflow version parsing accepts both `x.y` and `x.y.z`
+
 ## [0.1.0] - 2026-03-08
 
 ### Added
@@ -55,3 +70,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Caller latency test threshold adjusted to avoid flaky failures under machine load while preserving the p99 hot-path guard
 
 [0.1.0]: https://github.com/usezombie/posthog-zig/releases/tag/v0.1.0
+[0.1.1]: https://github.com/usezombie/posthog-zig/releases/tag/v0.1.1
