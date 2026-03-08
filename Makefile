@@ -75,7 +75,7 @@ coverage:  ## Run kcov coverage + enforce minimum threshold
 	@echo "→ Running kcov..."
 	@kcov --clean \
 	  --include-path="$(CURDIR)/src" \
-	  --replace-src-path="$(CURDIR),." \
+	  --strip-path="$(CURDIR)" \
 	  --exclude-pattern=.zig-cache,/usr/include,/usr/lib \
 	  .tmp/kcov-out zig-out/bin/posthog-tests >/dev/null
 	@cp .tmp/kcov-out/posthog-tests/cobertura.xml coverage/cobertura.xml
