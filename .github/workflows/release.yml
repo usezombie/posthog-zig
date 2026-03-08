@@ -87,7 +87,7 @@ jobs:
           EOF
           cat > build.zig.zon << EOF
           .{
-              .name = .@"fetch-test",
+              .name = .fetch_test,
               .version = "0.0.1",
               .dependencies = .{
                   .posthog = .{
