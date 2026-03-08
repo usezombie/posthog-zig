@@ -73,7 +73,11 @@ coverage:  ## Run kcov coverage + enforce minimum threshold
 	@echo "→ Building test binary..."
 	@$(MAKE) test-bin TARGET="x86_64-linux"
 	@echo "→ Running kcov..."
-	@kcov --clean --exclude-pattern=.zig-cache,/usr/include,/usr/lib .tmp/kcov-out zig-out/bin/posthog-tests >/dev/null
+	@kcov --clean \
+	  --include-path="$(CURDIR)/src" \
+	  --replace-src-path="$(CURDIR),." \
+	  --exclude-pattern=.zig-cache,/usr/include,/usr/lib \
+	  .tmp/kcov-out zig-out/bin/posthog-tests >/dev/null
 	@cp .tmp/kcov-out/posthog-tests/cobertura.xml coverage/cobertura.xml
 	@lines_valid=$$(sed -n 's/.*lines-valid="\([0-9][0-9]*\)".*/\1/p' coverage/cobertura.xml | head -n 1); \
 	 if [ -z "$$lines_valid" ]; then echo "✗ could not parse lines-valid from coverage/cobertura.xml"; exit 1; fi; \
