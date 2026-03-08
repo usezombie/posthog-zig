@@ -1,0 +1,15 @@
+.{
+    .name = .posthog,
+    .version = "0.1.0",
+    .fingerprint = 0xa5fe060596d90b43,
+    .minimum_zig_version = "0.15.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "tests",
+        "README.md",
+        "LICENSE",
+    },
+}
