@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-03-08
+
+### Fixed
+
+- Codecov upload routing is now explicit via workflow `slug` values to prevent cross-repo attribution
+
 ## [0.1.1] - 2026-03-08
 
 ### Changed
@@ -71,3 +77,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 [0.1.0]: https://github.com/usezombie/posthog-zig/releases/tag/v0.1.0
 [0.1.1]: https://github.com/usezombie/posthog-zig/releases/tag/v0.1.1
+[0.1.2]: https://github.com/usezombie/posthog-zig/releases/tag/v0.1.2
