@@ -431,5 +431,8 @@ test "integration: capture is non-blocking (avg < 1ms per call for 1000 events)"
     const elapsed_ns = std.time.nanoTimestamp() - start;
     const avg_ns = @divFloor(elapsed_ns, 1000);
 
-    try std.testing.expect(avg_ns < 1_000_000); // < 1ms per call
+    // Valgrind instrumentation in memleak mode adds heavy runtime overhead.
+    const in_memleak_mode = std.posix.getenv("POSTHOG_MEMLEAK_MODE") != null;
+    const max_avg_ns: i128 = if (in_memleak_mode) 50_000_000 else 1_000_000;
+    try std.testing.expect(avg_ns < max_avg_ns);
 }

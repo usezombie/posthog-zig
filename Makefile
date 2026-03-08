@@ -100,7 +100,7 @@ memleak:  ## Run allocator leak gate
 	  Linux) \
 	    $(MAKE) test-bin TARGET="$(MEMLEAK_TARGET)"; \
 	    command -v valgrind >/dev/null 2>&1 || { echo "✗ valgrind required on Linux"; exit 1; }; \
-	    valgrind --quiet --leak-check=full --show-leak-kinds=all \
+	    POSTHOG_MEMLEAK_MODE=1 valgrind --quiet --leak-check=full --show-leak-kinds=all \
 	      --errors-for-leak-kinds=definite,possible --error-exitcode=1 \
 	      zig-out/bin/posthog-tests;; \
 	  Darwin) \
