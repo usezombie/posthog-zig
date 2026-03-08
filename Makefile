@@ -76,7 +76,7 @@ coverage:  ## Run kcov coverage + enforce minimum threshold
 	@echo "→ Running kcov..."
 	@kcov --clean \
 	  --strip-path="$(CURDIR)/" \
-	  --exclude-pattern=".zig-cache,.tmp,zig-out,/usr/,/root/,/home/" \
+	  --exclude-pattern="/usr/,/root/,/home/" \
 	  .tmp/kcov-out zig-out/bin/posthog-tests >/dev/null 2>&1
 	@[ -f .tmp/kcov-out/posthog-tests/cobertura.xml ] || \
 	  { echo "✗ kcov did not produce cobertura.xml"; exit 1; }
@@ -91,8 +91,10 @@ coverage:  ## Run kcov coverage + enforce minimum threshold
 	 line_pct=$$(echo "$$stats" | awk '{print $$2}'); \
 	 if [ "$$lines_valid" -eq 0 ]; then \
 	   echo "✗ coverage report has zero src/ lines (kcov source mapping failed)"; \
-	   echo "→ files found in report:"; \
-	   grep 'filename=' coverage/cobertura.xml | sed 's/.*filename="//;s/".*//' | sort -u | head -20 || true; \
+	   echo "→ all filenames in cobertura.xml:"; \
+	   grep -o 'filename="[^"]*"' coverage/cobertura.xml | sort -u | head -30 || true; \
+	   echo "→ cobertura.xml head:"; \
+	   head -3 coverage/cobertura.xml || true; \
 	   exit 1; \
 	 fi; \
 	 printf 'line_coverage_pct=%s\nline_coverage_min=%s\n' "$$line_pct" "$(COVERAGE_MIN_LINES)" | tee .tmp/coverage.txt >/dev/null; \
