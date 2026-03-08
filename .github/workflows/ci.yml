@@ -27,22 +27,23 @@ jobs:
       - run: make test-unit
 
   # ── Line coverage (kcov + Codecov) ───────────────────────────────────────
+  # Uses debian:bookworm-slim where kcov v42 is available via apt.
+  # Ubuntu 24.04 dropped kcov from its repos; building from source is slow.
   coverage:
     runs-on: ubuntu-latest
+    container:
+      image: debian:bookworm-slim
     needs: test
     steps:
+      - name: Install kcov and toolchain deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            kcov git curl xz-utils ca-certificates make
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
-      - name: Install kcov (build from source — not in Ubuntu 24.04 apt)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake libssl-dev libdw-dev binutils-dev
-          git clone --depth 1 --branch v42 https://github.com/SimonKagstrom/kcov.git /tmp/kcov
-          cmake -S /tmp/kcov -B /tmp/kcov-build -DCMAKE_BUILD_TYPE=Release
-          make -C /tmp/kcov-build -j$(nproc)
-          sudo make -C /tmp/kcov-build install
       - name: Run coverage gate
         run: make test-coverage
       - name: Upload to Codecov
