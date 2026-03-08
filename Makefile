@@ -82,9 +82,8 @@ test-coverage:  ## Run kcov coverage + enforce minimum threshold
 	@$(MAKE) test-bin
 	@echo "→ Running kcov..."
 	@kcov --clean --include-pattern="$(CURDIR)/src" coverage zig-out/bin/posthog-tests >/dev/null
-	@cp coverage/posthog-tests/cobertura.xml coverage/cobertura.xml 2>/dev/null || true
-	@line_rate=$$(sed -n 's/.*line-rate="\([0-9.]*\)".*/\1/p' coverage/cobertura.xml | head -n 1); \
-	 if [ -z "$$line_rate" ]; then echo "✗ could not parse line-rate from coverage/cobertura.xml"; exit 1; fi; \
+	@line_rate=$$(sed -n 's/.*line-rate="\([0-9.]*\)".*/\1/p' coverage/posthog-tests/cobertura.xml | head -n 1); \
+	 if [ -z "$$line_rate" ]; then echo "✗ could not parse line-rate from coverage/posthog-tests/cobertura.xml"; exit 1; fi; \
 	 line_pct=$$(awk -v r="$$line_rate" 'BEGIN { printf "%.2f", r * 100 }'); \
 	 printf 'line_coverage_pct=%s\nline_coverage_min=%s\n' "$$line_pct" "$(COVERAGE_MIN_LINES)" | tee .tmp/coverage.txt >/dev/null; \
 	 awk -v got="$$line_pct" -v min="$(COVERAGE_MIN_LINES)" \
