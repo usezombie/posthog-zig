@@ -73,55 +73,17 @@ coverage:  ## Run kcov coverage + enforce minimum threshold
 	@mkdir -p "$(ZIG_GLOBAL_CACHE_DIR)" "$(ZIG_LOCAL_CACHE_DIR)" coverage .tmp
 	@echo "→ Building test binary..."
 	@$(MAKE) test-bin TARGET="$(COVERAGE_TARGET)"
-	@echo ""
-	@echo "══ DWARF diagnostic ════════════════════════════════════════"
-	@readelf -S zig-out/bin/posthog-tests 2>/dev/null \
-	  | awk '/\.debug_/{printf "  %s\n",$$2}' || echo "  readelf failed"
-	@readelf --debug-dump=info zig-out/bin/posthog-tests 2>/dev/null \
-	  | grep -E 'DWARF version|DW_AT_comp_dir|DW_AT_name' | head -8 \
-	  | sed 's/^/  /' || true
-	@echo ""
-	@echo "══ [1/4] kcov — no filters ═════════════════════════════════"
-	@kcov --clean .tmp/kcov-1 zig-out/bin/posthog-tests >/dev/null 2>&1 || true
-	@grep -o 'lines-valid="[0-9]*"' .tmp/kcov-1/posthog-tests/cobertura.xml \
-	  2>/dev/null | sed 's/^/  /' || echo "  (no xml)"
-	@grep -o 'filename="[^"]*"' .tmp/kcov-1/posthog-tests/cobertura.xml \
-	  2>/dev/null | head -5 | sed 's/^/  /' || echo "  (no filenames)"
-	@echo ""
-	@echo "══ [2/4] kcov — exclude /root/ /usr/ /home/ only ══════════"
+	@echo "→ Binary DWARF sections:"; \
+	  readelf -S zig-out/bin/posthog-tests 2>/dev/null \
+	    | awk '/\.debug_/{printf "  %s\n",$$2}' || echo "  (readelf failed)"
+	@echo "→ Running kcov..."
 	@kcov --clean \
 	  --strip-path="$(CURDIR)/" \
 	  --exclude-pattern="/root/,/usr/,/home/" \
-	  .tmp/kcov-2 zig-out/bin/posthog-tests >/dev/null 2>&1 || true
-	@grep -o 'lines-valid="[0-9]*"' .tmp/kcov-2/posthog-tests/cobertura.xml \
-	  2>/dev/null | sed 's/^/  /' || echo "  (no xml)"
-	@grep -o 'filename="[^"]*"' .tmp/kcov-2/posthog-tests/cobertura.xml \
-	  2>/dev/null | head -5 | sed 's/^/  /' || echo "  (no filenames)"
-	@echo ""
-	@echo "══ [3/4] kcov — include-path=$(CURDIR) ════════════════════"
-	@kcov --clean \
-	  --include-path="$(CURDIR)" \
-	  --strip-path="$(CURDIR)/" \
-	  .tmp/kcov-3 zig-out/bin/posthog-tests >/dev/null 2>&1 || true
-	@grep -o 'lines-valid="[0-9]*"' .tmp/kcov-3/posthog-tests/cobertura.xml \
-	  2>/dev/null | sed 's/^/  /' || echo "  (no xml)"
-	@grep -o 'filename="[^"]*"' .tmp/kcov-3/posthog-tests/cobertura.xml \
-	  2>/dev/null | head -5 | sed 's/^/  /' || echo "  (no filenames)"
-	@echo ""
-	@echo "══ [4/4] kcov — include-path=$(CURDIR)/src ════════════════"
-	@kcov --clean \
-	  --include-path="$(CURDIR)/src" \
-	  --strip-path="$(CURDIR)/" \
-	  .tmp/kcov-4 zig-out/bin/posthog-tests >/dev/null 2>&1 || true
-	@grep -o 'lines-valid="[0-9]*"' .tmp/kcov-4/posthog-tests/cobertura.xml \
-	  2>/dev/null | sed 's/^/  /' || echo "  (no xml)"
-	@grep -o 'filename="[^"]*"' .tmp/kcov-4/posthog-tests/cobertura.xml \
-	  2>/dev/null | head -5 | sed 's/^/  /' || echo "  (no filenames)"
-	@echo ""
-	@echo "══ coverage gate (using approach 2 result) ═════════════════"
-	@[ -f .tmp/kcov-2/posthog-tests/cobertura.xml ] || \
+	  .tmp/kcov-out zig-out/bin/posthog-tests >/dev/null 2>&1
+	@[ -f .tmp/kcov-out/posthog-tests/cobertura.xml ] || \
 	  { echo "✗ kcov did not produce cobertura.xml"; exit 1; }
-	@cp .tmp/kcov-2/posthog-tests/cobertura.xml coverage/cobertura.xml
+	@cp .tmp/kcov-out/posthog-tests/cobertura.xml coverage/cobertura.xml
 	@stats=$$(awk '\
 	  BEGIN{v=0;c=0;s=0}\
 	  /<class /{s=($$0 ~ /filename="[^"]*src\//)?1:0}\
@@ -130,7 +92,9 @@ coverage:  ## Run kcov coverage + enforce minimum threshold
 	 lines_valid=$$(echo "$$stats" | awk '{print $$1}'); \
 	 line_pct=$$(echo "$$stats" | awk '{print $$2}'); \
 	 if [ "$$lines_valid" -eq 0 ]; then \
-	   echo "✗ zero src/ lines across all approaches — kcov cannot parse this Zig binary's DWARF"; \
+	   echo "✗ zero src/ lines — kcov cannot parse this binary's DWARF"; \
+	   echo "  filenames in report:"; \
+	   grep -o 'filename="[^"]*"' coverage/cobertura.xml | head -10 | sed 's/^/    /' || echo "    (none)"; \
 	   exit 1; \
 	 fi; \
 	 printf 'line_coverage_pct=%s\nline_coverage_min=%s\n' "$$line_pct" "$(COVERAGE_MIN_LINES)" | tee .tmp/coverage.txt >/dev/null; \

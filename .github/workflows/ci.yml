@@ -35,11 +35,19 @@ jobs:
       options: --security-opt seccomp=unconfined
     needs: test
     steps:
-      - name: Install kcov and toolchain deps
+      - name: Install toolchain deps and build kcov from source
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            kcov git curl xz-utils ca-certificates make gpg
+            git curl xz-utils ca-certificates make gpg binutils \
+            cmake g++ libdwarf-dev libelf-dev zlib1g-dev \
+            libcurl4-openssl-dev binutils-dev ninja-build
+          git clone --depth 1 https://github.com/SimonKagstrom/kcov /tmp/kcov-src
+          cmake -S /tmp/kcov-src -B /tmp/kcov-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/kcov-build -j$(nproc)
+          cmake --install /tmp/kcov-build
+          kcov --version
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
