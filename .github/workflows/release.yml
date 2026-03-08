@@ -49,7 +49,7 @@ jobs:
           cat release_notes.txt
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           body_path: release_notes.txt
           name: "posthog-zig v${{ github.ref_name }}"
@@ -65,10 +65,19 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
+      - name: Create temp fetch workspace
+        run: |
+          FETCH_DIR="$(mktemp -d /tmp/posthog-fetch-XXXXXX)"
+          echo "FETCH_DIR=$FETCH_DIR" >> "$GITHUB_ENV"
       - name: Verify package is fetchable
+        working-directory: ${{ env.FETCH_DIR }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          mkdir /tmp/fetch-test && cd /tmp/fetch-test
+          cat > build.zig << EOF
+          const std = @import("std");
+
+          pub fn build(_: *std.Build) void {}
+          EOF
           cat > build.zig.zon << EOF
           .{
               .name = .@"fetch-test",
@@ -81,5 +90,5 @@ jobs:
               .paths = .{ "build.zig.zon" },
           }
           EOF
-          zig fetch --save https://github.com/usezombie/posthog-zig/archive/refs/tags/$TAG.tar.gz
+          zig fetch --save "https://github.com/usezombie/posthog-zig/archive/refs/tags/$TAG.tar.gz"
           echo "✓ package fetchable via zig fetch"
