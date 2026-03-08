@@ -5,6 +5,7 @@
 ZIG_GLOBAL_CACHE_DIR ?= $(CURDIR)/.tmp/zig-global-cache
 ZIG_LOCAL_CACHE_DIR  ?= $(CURDIR)/.tmp/zig-local-cache
 COVERAGE_MIN_LINES   ?= 60
+MEMLEAK_TARGET       ?= x86_64-linux
 
 .DEFAULT_GOAL := help
 
@@ -60,11 +61,11 @@ test-integration:  ## Run integration tests against live PostHog (requires POSTH
 
 # ── Coverage ─────────────────────────────────────────────────────────────────
 
-test-bin:  ## Build test binary for kcov
+test-bin:  ## Build test binary for kcov / memleak
 	@mkdir -p "$(ZIG_GLOBAL_CACHE_DIR)" "$(ZIG_LOCAL_CACHE_DIR)"
 	@ZIG_GLOBAL_CACHE_DIR="$(ZIG_GLOBAL_CACHE_DIR)" \
 	 ZIG_LOCAL_CACHE_DIR="$(ZIG_LOCAL_CACHE_DIR)" \
-	 zig build test-bin
+	 zig build test-bin $(if $(TARGET),-Dtarget=$(TARGET),)
 
 coverage:  ## Run kcov coverage + enforce minimum threshold
 	@command -v kcov >/dev/null 2>&1 || { echo "✗ kcov required (brew install kcov / apt-get install kcov)"; exit 1; }
@@ -95,21 +96,24 @@ bench:  ## Benchmark capture() hot-path latency
 
 memleak:  ## Run allocator leak gate
 	@echo "→ Running allocator leak gate..."
-	@$(MAKE) test-bin
 	@case "$$(uname -s)" in \
 	  Linux) \
+	    $(MAKE) test-bin TARGET="$(MEMLEAK_TARGET)"; \
 	    command -v valgrind >/dev/null 2>&1 || { echo "✗ valgrind required on Linux"; exit 1; }; \
-	    valgrind --quiet --leak-check=full --show-leak-kinds=all \
+	    POSTHOG_MEMLEAK_MODE=1 valgrind --quiet --leak-check=full --show-leak-kinds=all \
 	      --errors-for-leak-kinds=definite,possible --error-exitcode=1 \
 	      zig-out/bin/posthog-tests;; \
 	  Darwin) \
+	    $(MAKE) test-bin; \
 	    if command -v leaks >/dev/null 2>&1; then \
 	      MallocStackLogging=1 leaks -atExit -- zig-out/bin/posthog-tests >/dev/null || \
 	        echo "→ leaks unavailable in this runtime (allocator gate only)"; \
 	    else \
 	      echo "→ leaks not found; allocator gate only"; \
 	    fi;; \
-	  *) echo "→ platform=$$(uname -s): allocator gate only";; \
+	  *) \
+	    $(MAKE) test-bin; \
+	    echo "→ platform=$$(uname -s): allocator gate only";; \
 	esac
 	@echo "✓ memleak gate passed"
 
