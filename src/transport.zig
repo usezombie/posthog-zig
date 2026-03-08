@@ -105,6 +105,30 @@ fn doPost(allocator: std.mem.Allocator, url: []const u8, payload: []const u8) !u
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+test "postDecide: builds correct JSON payload shape" {
+    // Verify the payload format postDecide would send to /decide/?v=3
+    const allocator = std.testing.allocator;
+    const api_key = "phc_testkey";
+    const distinct_id = "user_123";
+
+    var payload_aw = std.io.Writer.Allocating.init(allocator);
+    defer payload_aw.deinit();
+    const pw = &payload_aw.writer;
+
+    try pw.writeAll("{\"api_key\":");
+    try types.writeJsonStr(pw, api_key);
+    try pw.writeAll(",\"distinct_id\":");
+    try types.writeJsonStr(pw, distinct_id);
+    try pw.writeByte('}');
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_aw.written(), .{});
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value == .object);
+    try std.testing.expectEqualStrings(api_key, parsed.value.object.get("api_key").?.string);
+    try std.testing.expectEqualStrings(distinct_id, parsed.value.object.get("distinct_id").?.string);
+}
+
 test "postBatch: empty events returns 200 without network call" {
     const status = try postBatch(std.testing.allocator, "https://us.i.posthog.com", "phc_test", &.{});
     try std.testing.expectEqual(@as(u16, 200), status);

@@ -197,6 +197,19 @@ test "writePropertyValue: integer negative" {
     try std.testing.expectEqualStrings("-42", aw.written());
 }
 
+test "writeJsonStr: control chars encoded as \\uXXXX" {
+    var aw = std.io.Writer.Allocating.init(std.testing.allocator);
+    defer aw.deinit();
+    try writeJsonStr(&aw.writer, "\x00");
+    try std.testing.expectEqualStrings("\"\\u0000\"", aw.written());
+    aw.clearRetainingCapacity();
+    try writeJsonStr(&aw.writer, "\x1f");
+    try std.testing.expectEqualStrings("\"\\u001f\"", aw.written());
+    aw.clearRetainingCapacity();
+    try writeJsonStr(&aw.writer, "\x08");
+    try std.testing.expectEqualStrings("\"\\u0008\"", aw.written());
+}
+
 test "writePropertyValue: boolean" {
     var aw = std.io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();

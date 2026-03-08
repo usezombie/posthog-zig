@@ -69,9 +69,10 @@ pub const FlushThread = struct {
     }
 
     /// Signal shutdown, drain remaining events, and join the thread.
-    /// timeout_ms is advisory — join is unbounded in v0.1.
+    /// In v0.1, join is unbounded — the thread always runs to completion.
+    /// timeout_ms is accepted for API stability but not enforced until v0.2.
     pub fn stop(self: *FlushThread, timeout_ms: u64) void {
-        _ = timeout_ms;
+        _ = timeout_ms; // v0.2: implement timed join using timeout_ms
         self.ctx.shutdown.store(true, .release);
         self.ctx.queue.signal();
         self.thread.join();

@@ -185,6 +185,69 @@ Comparison to other Zig codebases:
 
 ---
 
+## Observability hooks
+
+### `on_deliver` callback
+
+`Config.on_deliver` is an optional function pointer called by the flush thread after each batch attempt:
+
+```zig
+on_deliver: ?*const fn (status: DeliveryStatus, event_count: usize) void = null,
+```
+
+`DeliveryStatus` has three variants:
+
+| Status | Meaning |
+|---|---|
+| `.delivered` | HTTP 2xx received — events accepted by PostHog |
+| `.failed` | HTTP 4xx (not 429) — bad data, will not be retried |
+| `.dropped` | Max retries exhausted or network error — events lost |
+
+Use this for metrics instrumentation (Prometheus counters, internal dashboards). The callback runs on the flush thread — keep it non-blocking.
+
+### `Queue.droppedCount()`
+
+Returns the cumulative number of events dropped due to queue-full overflow since the client was initialized. Useful for alerting when the write-side arena is consistently saturated.
+
+---
+
+## Testability: injectable function pointers
+
+`FlushConfig` exposes three optional injection points used exclusively for unit testing:
+
+```zig
+post_batch_fn: ?PostBatchFn = null,  // replaces transport.postBatch
+backoff_fn:    ?BackoffFn   = null,  // replaces retry.backoffNs
+sleep_fn:      ?SleepFn     = null,  // replaces std.Thread.sleep
+```
+
+When `null` (production), the real implementations are used. In tests, `FlushMock` in `src/flush.zig` injects deterministic status sequences, zero-delay backoff, and a no-op sleep — making retry/drop/callback scenarios testable without network or real time.
+
+This pattern keeps the flush loop free of test-only branches while remaining fully exercisable.
+
+---
+
+## Manual flush and its tradeoffs
+
+`client.flush()` is a synchronous, one-shot drain:
+
+```zig
+pub fn flush(self: *PostHogClient) !void {
+    const result = self.queue.drain();
+    defer self.queue.resetSide(result.side_idx);
+    if (result.events.len == 0) return;
+    _ = try transport.postBatch(self.allocator, self.config.host, self.config.api_key, result.events);
+}
+```
+
+**No retry.** Unlike the background flush thread which retries up to `max_retries` times with exponential backoff, `flush()` makes one attempt. If PostHog returns 5xx or the network fails, the error is returned to the caller and the events are dropped (the arena side is reset by `defer`).
+
+This is intentional: `flush()` is designed for use in shutdown sequences where the process is about to exit. A retry loop inside `flush()` would block `deinit()` beyond the caller's expectation. If retry-on-manual-flush is needed, call `flush()` in a loop with your own backoff logic, or rely on the background thread.
+
+**`shutdown_flush_timeout_ms` is not yet enforced.** `FlushThread.stop()` calls `thread.join()` which is unbounded in v0.1. The timeout parameter is accepted for API stability and will enforce a timed join in v0.2.
+
+---
+
 ## What we deliberately excluded
 
 **Redis Streams bus pattern.** Considered: events → Redis Stream → posthog-node

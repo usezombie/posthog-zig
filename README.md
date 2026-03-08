@@ -2,7 +2,7 @@
 
 [![ci](https://github.com/usezombie/posthog-zig/actions/workflows/ci.yml/badge.svg)](https://github.com/usezombie/posthog-zig/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/usezombie/posthog-zig/branch/main/graph/badge.svg)](https://codecov.io/gh/usezombie/posthog-zig)
-[![version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/usezombie/posthog-zig/releases/tag/v0.1.0)
+[![version](https://img.shields.io/github/v/release/usezombie/posthog-zig?label=version)](https://github.com/usezombie/posthog-zig/releases)
 [![zig](https://img.shields.io/badge/zig-0.15.x-orange)](https://ziglang.org)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -137,6 +137,7 @@ try client.captureException(.{
 // Feature flags — sync, cached (one HTTP call per distinct_id per TTL)
 const enabled = try client.isFeatureEnabled("new-dashboard", "user_clerk_id");
 const payload = try client.getFeatureFlagPayload("new-dashboard", "user_clerk_id");
+defer if (payload) |p| allocator.free(p); // caller owns the returned slice
 
 // Manual flush — blocks until queue is empty
 try client.flush();
@@ -249,7 +250,7 @@ and counted. The next flush cycle resets the arena and restores full capacity.
 
 ### Retry policy
 
-- Retries on: 5xx, 429 (respects `Retry-After` header), network errors
+- Retries on: 5xx, 429, network errors
 - Does not retry on: 4xx (except 429) — bad data, logged and dropped
 - Backoff: `min(1s * 2^attempt, 30s)` + random jitter 0–500ms
 
@@ -259,7 +260,7 @@ and counted. The next flush cycle resets the arena and restores full capacity.
 
 ### Shutdown
 
-`client.deinit()` signals the flush thread to stop accepting new events, drains the remaining queue with a final `POST /batch/`, and waits up to `shutdown_flush_timeout_ms`. Events that cannot be delivered within the timeout are logged and dropped — they are not persisted to disk.
+`client.deinit()` signals the flush thread to stop accepting new events, performs a final `POST /batch/` of the remaining queue, and joins the thread (unbounded wait in v0.1 — see `shutdown_flush_timeout_ms` in Configuration). Events that cannot be delivered are logged and dropped — they are not persisted to disk.
 
 For deeper design rationale — memory model, crash delivery tradeoffs, v0.2 double-buffer arena target, and serialization approach — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -276,7 +277,7 @@ For deeper design rationale — memory model, crash delivery tradeoffs, v0.2 dou
 | `flush_at` | `20` | Flush when this many events are queued |
 | `max_queue_size` | `1000` | Queue capacity; drops newest on overflow |
 | `max_retries` | `3` | Max delivery attempts per batch |
-| `shutdown_flush_timeout_ms` | `5_000` | Max time `deinit()` waits for final flush |
+| `shutdown_flush_timeout_ms` | `5_000` | Reserved for v0.2 — `deinit()` blocks until the flush thread joins (unbounded in v0.1) |
 | `feature_flag_ttl_ms` | `60_000` | Feature flag cache TTL per distinct_id |
 
 ---
@@ -298,6 +299,12 @@ zig build -Dtarget=x86_64-linux --summary all 2>&1 | grep "link with" && echo "W
 
 # Benchmark capture() hot path
 zig build bench
+
+# Coverage report (requires kcov: brew install kcov / apt-get install kcov)
+make test-coverage
+
+# Memory leak gate (valgrind on Linux, leaks on macOS)
+make memleak
 ```
 
 ---

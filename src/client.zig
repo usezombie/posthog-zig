@@ -365,6 +365,40 @@ test "serializeException: stack_trace included when set" {
     try std.testing.expect(props.get("$exception_stack_trace_raw") != null);
 }
 
+test "flush: empty queue is a no-op (no network call)" {
+    const c = try PostHogClient.init(std.testing.allocator, .{
+        .api_key = "phc_test",
+        .enable_logging = false,
+        .flush_interval_ms = 60_000,
+        .flush_at = 1000,
+        .max_retries = 0,
+    });
+    defer c.deinit();
+    // No events — flush() returns immediately without touching the network.
+    try c.flush();
+    try std.testing.expectEqual(@as(usize, 0), c.queue.pendingCount());
+}
+
+test "flush: drains pending events (queue empties regardless of network outcome)" {
+    const c = try PostHogClient.init(std.testing.allocator, .{
+        .api_key = "phc_test",
+        .enable_logging = false,
+        .flush_interval_ms = 60_000,
+        .flush_at = 1000,
+        .max_retries = 0,
+    });
+    defer c.deinit();
+
+    try c.capture(.{ .distinct_id = "u1", .event = "x", .timestamp = 0 });
+    try std.testing.expectEqual(@as(usize, 1), c.queue.pendingCount());
+
+    // flush() drains and resets the arena side via defer — queue is empty
+    // regardless of whether the network POST succeeds.
+    // NOTE: flush() has no retry; a failed POST drops the batch silently.
+    c.flush() catch {};
+    try std.testing.expectEqual(@as(usize, 0), c.queue.pendingCount());
+}
+
 test "integration: PostHogClient init and deinit without network" {
     const client = try PostHogClient.init(std.testing.allocator, .{
         .api_key = "phc_test",

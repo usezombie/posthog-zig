@@ -87,6 +87,31 @@ test "integration: captureException reaches PostHog Error Tracking" {
     try client.flush();
 }
 
+test "integration: group reaches PostHog" {
+    const allocator = std.testing.allocator;
+    const api_key = try getApiKey(allocator);
+    defer allocator.free(api_key);
+
+    var client = try posthog.init(allocator, .{
+        .api_key = api_key,
+        .flush_interval_ms = 60_000,
+        .max_retries = 1,
+    });
+    defer client.deinit();
+
+    try client.group(.{
+        .distinct_id = "posthog-zig-integration-test",
+        .group_type = "company",
+        .group_key = "posthog-zig-ci",
+        .properties = &.{
+            .{ .key = "sdk_version", .value = .{ .string = posthog.version } },
+            .{ .key = "test", .value = .{ .boolean = true } },
+        },
+    });
+
+    try client.flush();
+}
+
 test "integration: on_deliver callback fires on successful delivery" {
     const allocator = std.testing.allocator;
     const api_key = try getApiKey(allocator);
