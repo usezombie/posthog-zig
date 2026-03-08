@@ -447,6 +447,38 @@ test "caller: concurrent producers — N threads, no data race" {
     try std.testing.expectEqual(@as(u64, N_THREADS * EVENTS_PER_THREAD), total);
 }
 
+test "caller: sustained producer pressure applies backpressure via drop-newest" {
+    const N_THREADS = 8;
+    const EVENTS_PER_THREAD = 250;
+    const CAPACITY = 100;
+
+    const client = try offlineClient(std.testing.allocator, CAPACITY);
+    defer client.deinit();
+
+    const Worker = struct {
+        fn run(c: *posthog.PostHogClient) void {
+            for (0..EVENTS_PER_THREAD) |i| {
+                c.capture(.{
+                    .distinct_id = "pressure_user",
+                    .event = "pressure_event",
+                    .timestamp = @intCast(i),
+                }) catch {};
+            }
+        }
+    };
+
+    var threads: [N_THREADS]std.Thread = undefined;
+    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Worker.run, .{client});
+    for (&threads) |*t| t.join();
+
+    const produced = N_THREADS * EVENTS_PER_THREAD;
+    const pending = pendingCount(client);
+    const dropped = droppedCount(client);
+
+    try std.testing.expectEqual(@as(usize, CAPACITY), pending);
+    try std.testing.expectEqual(@as(u64, produced - CAPACITY), dropped);
+}
+
 // ── on_deliver callback ───────────────────────────────────────────────────────
 
 test "caller: on_deliver callback — reports failure when host is unreachable" {

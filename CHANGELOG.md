@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Deterministic flush retry-path tests via injectable test hooks (`post_batch_fn`, `backoff_fn`, `sleep_fn`) in `src/flush.zig`.
+- New flush tests covering: `429 -> retry -> deliver`, non-retry `400 -> failed`, retry exhaustion -> `dropped`, and repeated network errors -> `dropped`.
+- New caller simulation test for sustained backpressure under concurrent producer load, asserting drop-newest behavior at fixed capacity.
+
 ### Changed
 
 - Added `enable_logging` config (default `true`) to allow deterministic silent test runs.
