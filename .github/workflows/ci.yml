@@ -33,6 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: debian:trixie-slim
+      options: --security-opt seccomp=unconfined
     needs: test
     steps:
       - name: Install kcov and toolchain deps
