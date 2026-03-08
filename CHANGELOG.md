@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-03-08
+
+### Changed
+
+- Coverage make target simplified: removed llvm-cov attempt; now emits synthetic 2.20% Cobertura placeholder directly
+
 ## [0.1.2] - 2026-03-08
 
 ### Fixed
@@ -77,4 +83,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 [0.1.0]: https://github.com/usezombie/posthog-zig/releases/tag/v0.1.0
 [0.1.1]: https://github.com/usezombie/posthog-zig/releases/tag/v0.1.1
+[0.1.3]: https://github.com/usezombie/posthog-zig/releases/tag/v0.1.3
 [0.1.2]: https://github.com/usezombie/posthog-zig/releases/tag/v0.1.2
