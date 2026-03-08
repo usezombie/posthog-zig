@@ -6,6 +6,66 @@ Design decisions, tradeoffs, and the target evolution of posthog-zig.
 
 ## End-to-end flow: from usezombie to PostHog
 
+```mermaid
+flowchart TD
+    subgraph zombied["zombied (usezombie control plane)"]
+        cap["capture()\nrun_started, deploy, run_end\n+ custom properties"]
+        exc["captureException()\n$exception_type, $exception_message\n$exception_level, stack_trace (opt)"]
+        ident["identify() — $set traits"]
+        grp["group() — $group_type / $group_key"]
+    end
+
+    cap & exc & ident & grp --> ser["Serialize to JSON (< 1μs)\ndistinct_id, $lib, $lib_version, ISO 8601 timestamp"]
+
+    subgraph sdk["posthog-zig SDK"]
+        subgraph queue["Queue — batch.zig"]
+            enq["enqueue()\nmutex lock → arena dupe → append → unlock"]
+            arenaA["Arena A (write side)\n[ev1][ev2][ev3]..."]
+            drop["count ≥ 1000? → drop newest"]
+            signal["count ≥ 20? → signal cond var"]
+        end
+
+        subgraph flush["FlushThread — flush.zig"]
+            wait["timedWait() — OS parks thread (zero CPU)"]
+            wake["Wake on: signal (≥20) | timeout (10s) | shutdown"]
+            drain["drain() — swap write↔flush sides, O(1)"]
+            arenaB["Arena B (flush side) — owned exclusively"]
+            post["POST /batch/"]
+            ok["2xx → on_deliver(.delivered)"]
+            retryable["429/5xx → retry, backoff min(1s×2^n, 30s)+jitter, max 3"]
+            bad["4xx → on_deliver(.failed), drop"]
+            exhausted["Retries exhausted → on_deliver(.dropped)"]
+            reset["resetSide() — one arena reset, all memory reclaimed"]
+        end
+    end
+
+    ser --> enq
+    enq --> arenaA
+    enq --> drop
+    enq --> signal
+    signal --> wake
+    wait --> wake
+    wake --> drain
+    drain --> arenaB
+    arenaB --> post
+    post --> ok
+    post --> retryable
+    post --> bad
+    retryable --> exhausted
+    ok & bad & exhausted --> reset
+
+    post --> posthog
+
+    subgraph posthog["PostHog (us.i.posthog.com/batch/)"]
+        events["Events — custom events"]
+        errors["Error Tracking — $exception"]
+        persons["Persons — $identify"]
+        groups["Groups — $groupidentify"]
+    end
+```
+
+<details><summary>ASCII version (for terminals / non-Mermaid renderers)</summary>
+
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  zombied (usezombie control plane)                                         │
@@ -75,6 +135,8 @@ Design decisions, tradeoffs, and the target evolution of posthog-zig.
 │    • Groups → $groupidentify events (group)                                │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
+
+</details>
 
 ### What gets pushed
 
