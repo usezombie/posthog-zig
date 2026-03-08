@@ -75,17 +75,26 @@ coverage:  ## Run kcov coverage + enforce minimum threshold
 	@$(MAKE) test-bin TARGET="$(COVERAGE_TARGET)"
 	@echo "→ Running kcov..."
 	@kcov --clean \
-	  --include-path="$(CURDIR)/src" \
-	  --strip-path="$(CURDIR)" \
-	  --exclude-pattern=.zig-cache,/usr/include,/usr/lib \
-	  .tmp/kcov-out zig-out/bin/posthog-tests >/dev/null
+	  --strip-path="$(CURDIR)/" \
+	  --exclude-pattern=".zig-cache,.tmp,zig-out,/usr/,/root/,/home/" \
+	  .tmp/kcov-out zig-out/bin/posthog-tests >/dev/null 2>&1
+	@[ -f .tmp/kcov-out/posthog-tests/cobertura.xml ] || \
+	  { echo "✗ kcov did not produce cobertura.xml"; exit 1; }
 	@cp .tmp/kcov-out/posthog-tests/cobertura.xml coverage/cobertura.xml
-	@lines_valid=$$(sed -n 's/.*lines-valid="\([0-9][0-9]*\)".*/\1/p' coverage/cobertura.xml | head -n 1); \
-	 if [ -z "$$lines_valid" ]; then echo "✗ could not parse lines-valid from coverage/cobertura.xml"; exit 1; fi; \
-	 if [ "$$lines_valid" -eq 0 ]; then echo "✗ coverage report has zero valid lines (kcov source mapping failed)"; exit 1; fi; \
-	 line_rate=$$(sed -n 's/.*line-rate="\([0-9.]*\)".*/\1/p' coverage/cobertura.xml | head -n 1); \
-	 if [ -z "$$line_rate" ]; then echo "✗ could not parse line-rate from coverage/cobertura.xml"; exit 1; fi; \
-	 line_pct=$$(awk -v r="$$line_rate" 'BEGIN { printf "%.2f", r * 100 }'); \
+	@# Compute coverage from src/ files only (handles kcov path-stripping variability)
+	@stats=$$(awk '\
+	  BEGIN{v=0;c=0;s=0}\
+	  /<class /{s=($$0 ~ /filename="[^"]*src\//)?1:0}\
+	  s&&/<line /{v++;if($$0 ~ /hits="[1-9]/)c++}\
+	  END{printf "%d %.2f",v,(v>0?c*100/v:0)}' coverage/cobertura.xml); \
+	 lines_valid=$$(echo "$$stats" | awk '{print $$1}'); \
+	 line_pct=$$(echo "$$stats" | awk '{print $$2}'); \
+	 if [ "$$lines_valid" -eq 0 ]; then \
+	   echo "✗ coverage report has zero src/ lines (kcov source mapping failed)"; \
+	   echo "→ files found in report:"; \
+	   grep 'filename=' coverage/cobertura.xml | sed 's/.*filename="//;s/".*//' | sort -u | head -20 || true; \
+	   exit 1; \
+	 fi; \
 	 printf 'line_coverage_pct=%s\nline_coverage_min=%s\n' "$$line_pct" "$(COVERAGE_MIN_LINES)" | tee .tmp/coverage.txt >/dev/null; \
 	 if awk -v got="$$line_pct" -v min="$(COVERAGE_MIN_LINES)" \
 	   'BEGIN { exit !((got+0) >= (min+0)) }'; then \
