@@ -61,6 +61,26 @@ jobs:
           path: coverage/
           retention-days: 7
 
+  # ── Memleak (valgrind on Debian Trixie) ──────────────────────────────────
+  memleak:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie-slim
+      options: --security-opt seccomp=unconfined
+    needs: test
+    steps:
+      - name: Install valgrind and toolchain deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            valgrind git curl xz-utils ca-certificates make gpg
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Run memleak gate
+        run: make memleak
+
   # ── Cross-compile: verify pure-Zig on Linux + macOS targets ──────────────
   cross-compile:
     runs-on: ubuntu-latest
