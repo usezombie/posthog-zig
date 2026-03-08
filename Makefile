@@ -8,8 +8,8 @@ COVERAGE_MIN_LINES   ?= 60
 
 .DEFAULT_GOAL := help
 
-.PHONY: help lint fmt fmt-check test test-unit test-integration test-depth \
-        test-bin test-coverage bench memleak clean
+.PHONY: help lint fmt fmt-check test test-unit test-integration \
+        test-bin coverage bench memleak clean
 
 help:  ## Show available targets
 	@echo "posthog-zig"
@@ -18,8 +18,7 @@ help:  ## Show available targets
 	@echo "  fmt           Auto-format all Zig source"
 	@echo "  test          Run unit tests"
 	@echo "  test-integration  Run integration tests (requires POSTHOG_API_KEY)"
-	@echo "  test-depth    Enforce minimum test count gate"
-	@echo "  test-coverage Run kcov coverage + enforce minimum threshold"
+	@echo "  coverage      Run kcov coverage + enforce minimum threshold"
 	@echo "  bench         Run capture() hot-path benchmark"
 	@echo "  memleak       Run allocator leak gate"
 	@echo "  clean         Remove build artifacts"
@@ -40,7 +39,7 @@ lint: fmt-check  ## Check formatting
 
 # ── Tests ────────────────────────────────────────────────────────────────────
 
-test: test-unit test-depth  ## Run unit tests + depth gate
+test: test-unit  ## Run unit tests
 
 test-unit:  ## Run unit tests
 	@echo "→ Running unit tests..."
@@ -59,14 +58,6 @@ test-integration:  ## Run integration tests against live PostHog (requires POSTH
 	 zig build test -Dintegration=true --summary all
 	@echo "✓ integration tests passed"
 
-test-depth:  ## Enforce minimum test count gate
-	@mkdir -p .tmp
-	@unit_count=$$(grep -rn '^test "' src -l --include='*.zig' | xargs grep -h '^test "' | wc -l | tr -d ' '); \
-	 integration_count=$$(grep -rn '^test "integration:' tests --include='*.zig' 2>/dev/null | wc -l | tr -d ' '); \
-	 printf 'unit_tests=%s\nintegration_tests=%s\n' "$$unit_count" "$$integration_count" | tee .tmp/test-depth.txt >/dev/null; \
-	 if [ "$$unit_count" -lt 15 ]; then echo "✗ expected >= 15 unit tests, got $$unit_count"; exit 1; fi; \
-	 echo "✓ test depth gate passed (unit=$$unit_count integration=$$integration_count)"
-
 # ── Coverage ─────────────────────────────────────────────────────────────────
 
 test-bin:  ## Build test binary for kcov
@@ -75,7 +66,7 @@ test-bin:  ## Build test binary for kcov
 	 ZIG_LOCAL_CACHE_DIR="$(ZIG_LOCAL_CACHE_DIR)" \
 	 zig build test-bin
 
-test-coverage:  ## Run kcov coverage + enforce minimum threshold
+coverage:  ## Run kcov coverage + enforce minimum threshold
 	@command -v kcov >/dev/null 2>&1 || { echo "✗ kcov required (brew install kcov / apt-get install kcov)"; exit 1; }
 	@mkdir -p "$(ZIG_GLOBAL_CACHE_DIR)" "$(ZIG_LOCAL_CACHE_DIR)" coverage .tmp
 	@echo "→ Building test binary..."

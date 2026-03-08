@@ -2,23 +2,18 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - "v[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+concurrency:
+  group: release-tag
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  # ── Verify tests pass on release tag ─────────────────────────────────────
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-      - run: make test-unit
-
   # ── Verify VERSION matches git tag ────────────────────────────────────────
   verify-version:
     runs-on: ubuntu-latest
@@ -31,16 +26,98 @@ jobs:
         id: meta
         run: |
           VERSION="$(tr -d '[:space:]' < VERSION)"
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
           echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+(\.[0-9]+)?$' || { echo "✗ VERSION must be version format x.y or x.y.z, got: $VERSION"; exit 1; }
-          TAG="v$VERSION"
+          [ "$TAG_VERSION" = "$VERSION" ] || { echo "✗ VERSION ($VERSION) does not match tag ($TAG_VERSION)"; exit 1; }
+          TAG="v$TAG_VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "✓ release version resolved: $VERSION ($TAG)"
+          echo "✓ release version resolved: $VERSION ($TAG), tag matches VERSION"
+
+  lint:
+    runs-on: ubuntu-latest
+    needs: verify-version
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - run: make lint
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - run: make test-unit
+
+  cross-compile:
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      matrix:
+        target:
+          - x86_64-linux
+          - aarch64-linux
+          - x86_64-macos
+          - aarch64-macos
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Build ${{ matrix.target }}
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+      - name: Verify no external C deps
+        run: |
+          result=$(zig build test-bin -Dtarget=${{ matrix.target }} --summary all 2>&1 | grep -c "link with" || true)
+          if [ "$result" -eq 0 ]; then
+            echo "PASS: pure Zig"
+          else
+            echo "WARN: C deps detected"
+            exit 1
+          fi
+
+  coverage:
+    runs-on: ubuntu-latest
+    needs: cross-compile
+    container:
+      image: debian:trixie-slim
+      options: --security-opt seccomp=unconfined
+    steps:
+      - name: Install kcov and toolchain deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            kcov git curl xz-utils ca-certificates make gpg
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Run coverage gate
+        run: make coverage
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage/cobertura.xml
+          flags: posthog-zig
+          fail_ci_if_error: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 7
 
   # ── GitHub Release with CHANGELOG excerpt ────────────────────────────────
   create-release:
     runs-on: ubuntu-latest
-    needs: [test, verify-version]
+    needs: [coverage, verify-version]
     permissions:
       contents: write
     steps:

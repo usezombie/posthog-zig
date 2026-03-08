@@ -1,7 +1,6 @@
 name: ci
 
 on:
-  push:
   pull_request:
 
 jobs:
@@ -46,7 +45,7 @@ jobs:
         with:
           version: 0.15.2
       - name: Run coverage gate
-        run: make test-coverage
+        run: make coverage
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5
         with:
