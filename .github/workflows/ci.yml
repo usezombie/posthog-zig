@@ -27,12 +27,12 @@ jobs:
       - run: make test-unit
 
   # ── Line coverage (kcov + Codecov) ───────────────────────────────────────
-  # Uses debian:bookworm-slim where kcov v42 is available via apt.
-  # Ubuntu 24.04 dropped kcov from its repos; building from source is slow.
+  # Debian Trixie ships kcov v43 in its repos.
+  # Ubuntu 24.04 / Bookworm dropped kcov; Trixie (Debian 13) restored it.
   coverage:
     runs-on: ubuntu-latest
     container:
-      image: debian:bookworm-slim
+      image: debian:trixie-slim
     needs: test
     steps:
       - name: Install kcov and toolchain deps
