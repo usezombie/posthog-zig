@@ -31,7 +31,7 @@ jobs:
         id: meta
         run: |
           VERSION="$(tr -d '[:space:]' < VERSION)"
-          echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "✗ VERSION must be semver (x.y.z), got: $VERSION"; exit 1; }
+          echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+(\.[0-9]+)?$' || { echo "✗ VERSION must be version format x.y or x.y.z, got: $VERSION"; exit 1; }
           TAG="v$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
