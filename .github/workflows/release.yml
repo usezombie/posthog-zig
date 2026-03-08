@@ -2,8 +2,8 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -22,15 +22,20 @@ jobs:
   # ── Verify VERSION matches git tag ────────────────────────────────────────
   verify-version:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v6
-      - name: Check VERSION matches tag
+      - name: Resolve release version
+        id: meta
         run: |
-          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
-          FILE_VERSION="$(cat VERSION | tr -d '[:space:]')"
-          echo "tag=$TAG_VERSION file=$FILE_VERSION"
-          [ "$TAG_VERSION" = "$FILE_VERSION" ] || { echo "✗ VERSION ($FILE_VERSION) does not match tag ($TAG_VERSION)"; exit 1; }
-          echo "✓ VERSION matches tag"
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "✗ VERSION must be semver (x.y.z), got: $VERSION"; exit 1; }
+          TAG="v$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "✓ release version resolved: $VERSION ($TAG)"
 
   # ── GitHub Release with CHANGELOG excerpt ────────────────────────────────
   create-release:
@@ -43,7 +48,7 @@ jobs:
 
       - name: Extract changelog for this version
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
+          VERSION="${{ needs.verify-version.outputs.version }}"
           sed -n "/^## \[$VERSION\]/,/^## \[/p" CHANGELOG.md | sed '$d' > release_notes.txt
           echo "--- Release notes ---"
           cat release_notes.txt
@@ -51,15 +56,17 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.verify-version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           body_path: release_notes.txt
-          name: "posthog-zig v${{ github.ref_name }}"
+          name: "posthog-zig ${{ needs.verify-version.outputs.tag }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ── Publish zig package (zig fetch verification) ──────────────────────────
   verify-fetchable:
     runs-on: ubuntu-latest
-    needs: create-release
+    needs: [create-release, verify-version]
     steps:
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
@@ -72,7 +79,7 @@ jobs:
       - name: Verify package is fetchable
         working-directory: ${{ env.FETCH_DIR }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="${{ needs.verify-version.outputs.tag }}"
           cat > build.zig << EOF
           const std = @import("std");
 
