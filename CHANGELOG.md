@@ -81,7 +81,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `FlushThread.stop()` comment clarified: timeout parameter accepted for API stability, timed join deferred to v0.2
 - Caller latency test threshold adjusted to avoid flaky failures under machine load while preserving the p99 hot-path guard
 
-[0.1.0]: https://github.com/usezombie/posthog-zig/releases/tag/v0.1.0
-[0.1.1]: https://github.com/usezombie/posthog-zig/releases/tag/v0.1.1
 [0.1.3]: https://github.com/usezombie/posthog-zig/releases/tag/v0.1.3
 [0.1.2]: https://github.com/usezombie/posthog-zig/releases/tag/v0.1.2
+[0.1.1]: https://github.com/usezombie/posthog-zig/releases/tag/v0.1.1
+[0.1.0]: https://github.com/usezombie/posthog-zig/releases/tag/v0.1.0
