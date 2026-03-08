@@ -152,7 +152,7 @@ pub const Queue = struct {
     pub fn pendingCount(self: *Queue) usize {
         self.mutex.lock();
         defer self.mutex.unlock();
-        return self.sides[self.write_idx].count;
+        return self.sides[0].count + self.sides[1].count;
     }
 
     pub fn droppedCount(self: *Queue) u64 {
@@ -188,10 +188,12 @@ test "queue: enqueue and drain single event" {
     try std.testing.expectEqual(@as(usize, 1), q.pendingCount());
 
     const r = q.drain();
-    defer q.resetSide(r.side_idx);
 
     try std.testing.expectEqual(@as(usize, 1), r.events.len);
     try std.testing.expectEqualStrings("{\"event\":\"test\"}", r.events[0]);
+    // pendingCount includes in-flight (drained but not yet reset) events
+    try std.testing.expectEqual(@as(usize, 1), q.pendingCount());
+    q.resetSide(r.side_idx);
     try std.testing.expectEqual(@as(usize, 0), q.pendingCount());
 }
 
