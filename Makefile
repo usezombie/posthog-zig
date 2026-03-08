@@ -5,6 +5,7 @@
 ZIG_GLOBAL_CACHE_DIR ?= $(CURDIR)/.tmp/zig-global-cache
 ZIG_LOCAL_CACHE_DIR  ?= $(CURDIR)/.tmp/zig-local-cache
 COVERAGE_MIN_LINES   ?= 60
+COVERAGE_TARGET      ?= x86_64-linux
 MEMLEAK_TARGET       ?= x86_64-linux
 
 .DEFAULT_GOAL := help
@@ -71,7 +72,7 @@ coverage:  ## Run kcov coverage + enforce minimum threshold
 	@command -v kcov >/dev/null 2>&1 || { echo "✗ kcov required (brew install kcov / apt-get install kcov)"; exit 1; }
 	@mkdir -p "$(ZIG_GLOBAL_CACHE_DIR)" "$(ZIG_LOCAL_CACHE_DIR)" coverage .tmp
 	@echo "→ Building test binary..."
-	@$(MAKE) test-bin TARGET="x86_64-linux"
+	@$(MAKE) test-bin TARGET="$(COVERAGE_TARGET)"
 	@echo "→ Running kcov..."
 	@kcov --clean \
 	  --include-path="$(CURDIR)/src" \
