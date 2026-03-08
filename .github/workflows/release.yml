@@ -106,6 +106,7 @@ jobs:
           files: coverage/cobertura.xml
           flags: posthog-zig
           fail_ci_if_error: true
+          disable_search: true
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload coverage artifact
