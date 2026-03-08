@@ -4,6 +4,100 @@ Design decisions, tradeoffs, and the target evolution of posthog-zig.
 
 ---
 
+## End-to-end flow: from usezombie to PostHog
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  zombied (usezombie control plane)                                         │
+│                                                                            │
+│  ┌─────────────────────┐  ┌──────────────────────┐  ┌──────────────────┐   │
+│  │ capture("run_start") │  │ captureException()   │  │ identify()       │   │
+│  │ capture("run_end")   │  │   $exception_type    │  │ group()          │   │
+│  │ capture("deploy")    │  │   $exception_message │  │                  │   │
+│  │ + custom properties  │  │   $exception_level   │  │ $set traits      │   │
+│  │                      │  │   stack_trace (opt)   │  │ $group_type/key  │   │
+│  └──────────┬───────────┘  └──────────┬───────────┘  └────────┬─────────┘   │
+│             │                         │                       │             │
+│             └─────────────────┬───────┘───────────────────────┘             │
+│                               ▼                                            │
+│                    serialize to JSON (< 1μs)                               │
+│                    + distinct_id, $lib, $lib_version, ISO 8601 timestamp   │
+└──────────────────────────────┬─────────────────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  posthog-zig SDK                                                           │
+│                                                                            │
+│  ┌─────────────────────────── Queue (batch.zig) ───────────────────────┐   │
+│  │                                                                     │   │
+│  │  enqueue() — mutex lock, arena dupe, append to event index, unlock  │   │
+│  │  If count >= flush_at (default 20): signal condition variable       │   │
+│  │  If count >= max_queue_size (default 1000): drop event (newest)     │   │
+│  │                                                                     │   │
+│  │  Arena A (write side)            Arena B (flush side)               │   │
+│  │  [ev1_json][ev2_json][ev3]...    [being POSTed]                     │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                               │                                            │
+│                               ▼                                            │
+│  ┌───────────────────── FlushThread (flush.zig) ──────────────────────┐    │
+│  │                                                                    │    │
+│  │  loop:                                                             │    │
+│  │    wait for signal OR flush_interval_ms timeout (default 10s)      │    │
+│  │    drain() — swap write↔flush sides (O(1) index flip under mutex)  │    │
+│  │    if no events: continue                                          │    │
+│  │    POST /batch/ with all events from flush side                    │    │
+│  │      on 2xx: on_deliver(.delivered) → resetSide() (arena reclaim)  │    │
+│  │      on 429/5xx: retry up to max_retries (default 3)               │    │
+│  │        exponential backoff: min(1s × 2^attempt, 30s) + jitter      │    │
+│  │      on 4xx: on_deliver(.failed) → drop batch, no retry            │    │
+│  │      retries exhausted: on_deliver(.dropped) → drop batch          │    │
+│  │    resetSide() — one arena reset, all memory reclaimed              │    │
+│  │                                                                    │    │
+│  │  on shutdown:                                                      │    │
+│  │    final drain() + POST (best-effort, no retry on manual flush)    │    │
+│  │    thread.join()                                                    │    │
+│  │                                                                    │    │
+│  └────────────────────────────┬───────────────────────────────────────┘    │
+│                               │                                            │
+└───────────────────────────────┼────────────────────────────────────────────┘
+                                │
+                                ▼  HTTP POST
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  PostHog  (https://us.i.posthog.com/batch/)                                │
+│                                                                            │
+│  { "api_key": "phc_...", "batch": [ {event}, {event}, ... ] }              │
+│                                                                            │
+│  Events appear in:                                                         │
+│    • Events → custom events (capture)                                      │
+│    • Error Tracking → $exception events (captureException)                 │
+│    • Persons → $identify events (identify)                                 │
+│    • Groups → $groupidentify events (group)                                │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### What gets pushed
+
+| Method | PostHog event | Use case in zombied |
+|---|---|---|
+| `capture()` | Custom event name (e.g. `run_started`, `deploy_completed`) | Business analytics, usage tracking |
+| `captureException()` | `$exception` with `$exception_type`, `$exception_message`, `$exception_level`, optional stack trace | Error tracking — caught errors, OOM, workspace failures |
+| `identify()` | `$identify` with `$set` properties | Associate traits (email, plan) with a distinct_id |
+| `group()` | `$groupidentify` with `$group_type`, `$group_key`, `$group_set` | Associate users with workspaces/orgs |
+
+### Key timing defaults
+
+| Parameter | Default | Purpose |
+|---|---|---|
+| `flush_interval_ms` | 10,000 (10s) | Max wait before background flush fires |
+| `flush_at` | 20 events | Threshold to wake flush thread early |
+| `max_queue_size` | 1,000 events | Per-side capacity; overflow drops newest |
+| `max_retries` | 3 | Retry count for 429/5xx responses |
+| `shutdown_flush_timeout_ms` | 5,000 (5s) | Reserved for v0.2 timed join |
+| `feature_flag_ttl_ms` | 60,000 (60s) | Cache TTL for feature flag decisions |
+
+---
+
 ## Why this SDK exists
 
 posthog-zig is the server-side analytics layer for the usezombie stack. The first
