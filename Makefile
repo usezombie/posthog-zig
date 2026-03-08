@@ -5,7 +5,6 @@
 ZIG_GLOBAL_CACHE_DIR ?= $(CURDIR)/.tmp/zig-global-cache
 ZIG_LOCAL_CACHE_DIR  ?= $(CURDIR)/.tmp/zig-local-cache
 COVERAGE_MIN_LINES   ?= 60
-MEMLEAK_TARGET       ?= x86_64-linux
 
 .DEFAULT_GOAL := help
 
@@ -61,11 +60,11 @@ test-integration:  ## Run integration tests against live PostHog (requires POSTH
 
 # ── Coverage ─────────────────────────────────────────────────────────────────
 
-test-bin:  ## Build test binary for kcov / memleak
+test-bin:  ## Build test binary for kcov
 	@mkdir -p "$(ZIG_GLOBAL_CACHE_DIR)" "$(ZIG_LOCAL_CACHE_DIR)"
 	@ZIG_GLOBAL_CACHE_DIR="$(ZIG_GLOBAL_CACHE_DIR)" \
 	 ZIG_LOCAL_CACHE_DIR="$(ZIG_LOCAL_CACHE_DIR)" \
-	 zig build test-bin $(if $(TARGET),-Dtarget=$(TARGET),)
+	 zig build test-bin
 
 coverage:  ## Run kcov coverage + enforce minimum threshold
 	@command -v kcov >/dev/null 2>&1 || { echo "✗ kcov required (brew install kcov / apt-get install kcov)"; exit 1; }
@@ -73,15 +72,22 @@ coverage:  ## Run kcov coverage + enforce minimum threshold
 	@echo "→ Building test binary..."
 	@$(MAKE) test-bin
 	@echo "→ Running kcov..."
-	@kcov --clean --include-pattern="$(CURDIR)/src" .tmp/kcov-out zig-out/bin/posthog-tests >/dev/null
+	@kcov --clean --include-pattern=src .tmp/kcov-out zig-out/bin/posthog-tests >/dev/null
 	@cp .tmp/kcov-out/posthog-tests/cobertura.xml coverage/cobertura.xml
-	@line_rate=$$(sed -n 's/.*line-rate="\([0-9.]*\)".*/\1/p' coverage/cobertura.xml | head -n 1); \
+	@lines_valid=$$(sed -n 's/.*lines-valid="\([0-9][0-9]*\)".*/\1/p' coverage/cobertura.xml | head -n 1); \
+	 if [ -z "$$lines_valid" ]; then echo "✗ could not parse lines-valid from coverage/cobertura.xml"; exit 1; fi; \
+	 if [ "$$lines_valid" -eq 0 ]; then echo "✗ coverage report has zero valid lines (kcov source mapping failed)"; exit 1; fi; \
+	 line_rate=$$(sed -n 's/.*line-rate="\([0-9.]*\)".*/\1/p' coverage/cobertura.xml | head -n 1); \
 	 if [ -z "$$line_rate" ]; then echo "✗ could not parse line-rate from coverage/cobertura.xml"; exit 1; fi; \
 	 line_pct=$$(awk -v r="$$line_rate" 'BEGIN { printf "%.2f", r * 100 }'); \
 	 printf 'line_coverage_pct=%s\nline_coverage_min=%s\n' "$$line_pct" "$(COVERAGE_MIN_LINES)" | tee .tmp/coverage.txt >/dev/null; \
-	 awk -v got="$$line_pct" -v min="$(COVERAGE_MIN_LINES)" \
-	   'BEGIN { if ((got+0) < (min+0)) { printf "✗ coverage %.2f%% below threshold %.2f%%\n", got, min; exit 1 } }'; \
-	 echo "✓ coverage gate passed ($$line_pct% >= $(COVERAGE_MIN_LINES)%)"
+	 if awk -v got="$$line_pct" -v min="$(COVERAGE_MIN_LINES)" \
+	   'BEGIN { exit !((got+0) >= (min+0)) }'; then \
+	   echo "✓ coverage gate passed ($$line_pct% >= $(COVERAGE_MIN_LINES)%)"; \
+	 else \
+	   printf "✗ coverage %.2f%% below threshold %.2f%%\n" "$$line_pct" "$(COVERAGE_MIN_LINES)"; \
+	   exit 1; \
+	 fi
 
 # ── Bench ────────────────────────────────────────────────────────────────────
 
@@ -96,24 +102,21 @@ bench:  ## Benchmark capture() hot-path latency
 
 memleak:  ## Run allocator leak gate
 	@echo "→ Running allocator leak gate..."
+	@$(MAKE) test-bin
 	@case "$$(uname -s)" in \
 	  Linux) \
-	    $(MAKE) test-bin TARGET="$(MEMLEAK_TARGET)"; \
 	    command -v valgrind >/dev/null 2>&1 || { echo "✗ valgrind required on Linux"; exit 1; }; \
-	    POSTHOG_MEMLEAK_MODE=1 valgrind --quiet --leak-check=full --show-leak-kinds=all \
+	    valgrind --quiet --leak-check=full --show-leak-kinds=all \
 	      --errors-for-leak-kinds=definite,possible --error-exitcode=1 \
 	      zig-out/bin/posthog-tests;; \
 	  Darwin) \
-	    $(MAKE) test-bin; \
 	    if command -v leaks >/dev/null 2>&1; then \
 	      MallocStackLogging=1 leaks -atExit -- zig-out/bin/posthog-tests >/dev/null || \
 	        echo "→ leaks unavailable in this runtime (allocator gate only)"; \
 	    else \
 	      echo "→ leaks not found; allocator gate only"; \
 	    fi;; \
-	  *) \
-	    $(MAKE) test-bin; \
-	    echo "→ platform=$$(uname -s): allocator gate only";; \
+	  *) echo "→ platform=$$(uname -s): allocator gate only";; \
 	esac
 	@echo "✓ memleak gate passed"
 
