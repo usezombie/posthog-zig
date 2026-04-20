@@ -168,6 +168,8 @@ jobs:
           .{
               .name = .fetch_test,
               .version = "0.0.1",
+              .fingerprint = 0x1c1c658521dd0fe1,
+              .minimum_zig_version = "0.16.0",
               .dependencies = .{
                   .posthog = .{
                       .url = "https://github.com/usezombie/posthog-zig/archive/refs/tags/$TAG.tar.gz",
