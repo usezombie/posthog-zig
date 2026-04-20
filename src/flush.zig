@@ -93,7 +93,15 @@ pub const FlushThread = struct {
         // panicking in debug) if a caller passes an absurd timeout_ms is
         // worse than clamping at u64::MAX and letting the @intCast below
         // police the i64 bound.
-        const timeout_ns: i64 = @intCast(timeout_ms *| std.time.ns_per_ms);
+        // Saturating mul caps the u64 product at u64::MAX on absurd inputs,
+        // then @min clamps to i64::MAX so the @intCast never panics — the
+        // contract is "any `timeout_ms` is accepted; impossibly large values
+        // resolve to an effectively-infinite deadline" rather than a debug
+        // crash.
+        const timeout_ns: i64 = @intCast(@min(
+            timeout_ms *| std.time.ns_per_ms,
+            @as(u64, std.math.maxInt(i64)),
+        ));
         // `now` is `i96` (from `Io.Timestamp.nanoseconds`), `timeout_ns` is
         // `i64`. Zig 0.16 implicitly widens the smaller integer on mixed-type
         // addition, so the sum is `i96`; the final `@intCast` brings it back

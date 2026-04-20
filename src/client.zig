@@ -426,7 +426,6 @@ test "integration: capture is non-blocking (avg < 1ms per call for 1000 events)"
     const avg_ns = @divFloor(elapsed_ns, 1000);
 
     // Valgrind instrumentation in memleak mode adds heavy runtime overhead.
-    // Zig 0.16 removed `std.posix.getenv` — read through the Threaded Io's Environ.
     const env = std.Options.debug_threaded_io.?.environ.process_environ;
     const in_memleak_mode = env.getPosix("POSTHOG_MEMLEAK_MODE") != null;
     const max_avg_ns: i128 = if (in_memleak_mode) 50_000_000 else 1_000_000;

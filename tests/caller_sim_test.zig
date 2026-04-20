@@ -238,11 +238,11 @@ test "caller: hot-path latency p50/p95/p99 over 10_000 captures" {
     }
 
     // Measure total elapsed time for N calls and compute the average.
-    // 0.15 bracketed each call with nanoTimestamp(); 0.16's
-    // std.Io.Clock.awake.now() goes through a vtable dispatch that is
-    // measurable at microsecond scale, so per-call p99 measurement now
-    // captures mostly clock overhead rather than capture() latency.
-    // Average-over-batch is a truer signal for the non-blocking hot path.
+    // `std.Io.Clock.awake.now()` goes through a vtable dispatch that is
+    // measurable at microsecond scale; bracketing every call with two
+    // clock reads would capture mostly clock overhead rather than
+    // capture() latency. Average-over-batch is the truer signal for the
+    // non-blocking hot path.
     const io = posthog.defaultIo();
     const t0 = std.Io.Clock.awake.now(io).nanoseconds;
     for (0..N) |i| {
@@ -578,8 +578,8 @@ test "caller: optional client pattern — null when no api key configured" {
     // The recommended pattern for services where analytics is optional
     var opt_client: ?*posthog.PostHogClient = null;
 
-    // Simulate: only init if env var present (here: always absent in test)
-    // Zig 0.16 removed `std.posix.getenv` — read from the Threaded Io's Environ.
+    // Simulate: only init if env var present (here: always absent in test).
+    // Env access goes through the Threaded Io's Environ view.
     const env = std.Options.debug_threaded_io.?.environ.process_environ;
     if (env.getPosix("POSTHOG_API_KEY_SHOULD_NOT_EXIST_IN_TEST")) |key| {
         opt_client = try posthog.init(std.testing.allocator, posthog.defaultIo(), .{

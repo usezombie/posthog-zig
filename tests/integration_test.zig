@@ -5,7 +5,7 @@ const std = @import("std");
 const posthog = @import("posthog");
 
 fn getApiKey(allocator: std.mem.Allocator) ![]const u8 {
-    // Zig 0.16 removed `std.process.getEnvVarOwned`.
+    // Env access goes through the Threaded Io's Environ view.
     const env = std.Options.debug_threaded_io.?.environ.process_environ;
     const val = env.getPosix("POSTHOG_API_KEY") orelse {
         std.debug.print("SKIP: POSTHOG_API_KEY not set\n", .{});

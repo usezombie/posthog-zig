@@ -3,12 +3,11 @@
 const std = @import("std");
 
 /// Thread-local PRNG lazily seeded from values that do not require an `Io`.
-/// Zig 0.16 removed `std.crypto.random`; retry jitter is non-cryptographic,
-/// so a seeded `DefaultPrng` is sufficient. Seed entropy comes from the
-/// address of the thread-local slot (unique per thread) mixed with a
-/// process-wide atomic counter (unique per init) — no dependency on
-/// `std.Options.debug_threaded_io`, so this works under alternative Io
-/// backends or when no ambient Io is configured at all.
+/// Retry jitter is non-cryptographic, so a seeded `DefaultPrng` is sufficient.
+/// Seed entropy comes from the address of the thread-local slot (unique per
+/// thread) mixed with a process-wide atomic counter (unique per init) — no
+/// dependency on `std.Options.debug_threaded_io`, so this works under any
+/// Io backend or when no ambient Io is configured at all.
 threadlocal var rng_state: ?std.Random.DefaultPrng = null;
 
 var seed_counter: std.atomic.Value(u64) = .init(0);

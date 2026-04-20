@@ -17,15 +17,15 @@
 //! (drop-newest). The arena cannot free individual entries; all memory for a
 //! side is reclaimed together on reset after successful delivery.
 //!
-//! Concurrency (Zig 0.16):
+//! Concurrency:
 //!   - `mutex` (std.Io.Mutex) guards `write_idx`, `count`, `dropped`, and
-//!     arena allocation. It protects indices/counters AND the arena; the arena
-//!     itself is lock-free in 0.16, but we share the mutex to keep the sibling
-//!     state coherent.
-//!   - `wake` (std.Io.Event) is the flush-thread wakeup signal. Io.Condition
-//!     in 0.16 has no timedWait, so we use Io.Event.waitTimeout instead. Single
-//!     consumer (the flush thread) calls reset() after each wakeup; producers
-//!     only call set().
+//!     arena allocation. ArenaAllocator is lock-free on its own, but the
+//!     mutex is shared with the indices/counters it sits next to, so it
+//!     stays.
+//!   - `wake` (std.Io.Event) is the flush-thread wakeup signal. `Io.Condition`
+//!     has no `timedWait`, so the timed-wait path is expressed via
+//!     `Event.waitTimeout`. Single consumer (the flush thread) calls
+//!     `reset()` after each wake-up; producers only call `set()`.
 //!
 //! See docs/ARCHITECTURE.md for design rationale and v0.2 plans.
 

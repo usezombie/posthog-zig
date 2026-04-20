@@ -5,13 +5,13 @@ const std = @import("std");
 pub const version = "0.2.0";
 pub const lib_name = "posthog-zig";
 
-/// Epoch-milliseconds timestamp (post-0.15: std.time.milliTimestamp is gone).
+/// Epoch-milliseconds timestamp backed by `std.Io.Clock.real`.
 pub fn nowMs(io: std.Io) i64 {
     const ts = std.Io.Clock.real.now(io);
     return @intCast(@divTrunc(ts.nanoseconds, std.time.ns_per_ms));
 }
 
-/// Monotonic-clock nanoseconds (post-0.15: std.time.nanoTimestamp is gone).
+/// Monotonic-clock nanoseconds backed by `std.Io.Clock.awake`.
 pub fn monotonicNs(io: std.Io) i64 {
     const ts = std.Io.Clock.awake.now(io);
     return @intCast(ts.nanoseconds);
@@ -149,8 +149,10 @@ pub fn formatIso8601(writer: anytype, epoch_ms: i64) !void {
     const m: i64 = if (mp < 10) mp + 3 else mp - 9;
     const year: i64 = if (m <= 2) y + 1 else y;
 
-    // Cast to u64 — Zig 0.15 prints explicit '+' sign for i64 with zero-pad format.
-    // All values are guaranteed non-negative for post-epoch timestamps.
+    // Cast to u64: formatIso8601 only handles post-epoch timestamps where
+    // year/month/day are non-negative. The unsigned cast keeps the output
+    // deterministic regardless of any future Zig change to signed
+    // zero-pad formatting (e.g. a leading '+' on positive i64 values).
     try writer.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
         @as(u64, @intCast(year)), @as(u64, @intCast(m)), @as(u64, @intCast(d)),
         h,                        mn,                    s,
