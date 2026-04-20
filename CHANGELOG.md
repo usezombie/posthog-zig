@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-20
+
+### Breaking
+
+- `posthog.init(...)` now takes an `io: std.Io` argument between `allocator` and `config`. Pass `posthog.defaultIo()` if you have no opinion, or your own `std.Io.Threaded` for concurrency policy. Zig 0.15.2 users: pin posthog-zig `0.1.x` — see [`docs/ZIG_0_15_COMPAT.md`](docs/ZIG_0_15_COMPAT.md).
+- Minimum Zig version is now `0.16.0`. `0.15.x` is no longer supported on the `0.2.x` line.
+
+### Changed
+
+- Internal concurrency primitives migrated to Zig 0.16's `std.Io`: `std.Thread.Mutex/Condition` -> `std.Io.Mutex` + `std.Io.Event` (the flush-thread wake signal is an Event because `Io.Condition` has no `timedWait` in 0.16).
+- HTTP transport routes through `std.http.Client{ .allocator, .io }`; `postBatch` / `postDecide` gained an `io` parameter.
+- Retry jitter uses a threadlocal `std.Random.DefaultPrng` seeded from `Io.Clock.awake.now`; `std.crypto.random` is gone in 0.16.
+- Environment reads and monotonic/real-time clock reads go through `std.Options.debug_threaded_io` (`std.posix.getenv` and `std.time.{milli,nano}Timestamp` were removed in 0.16).
+- CI workflows pinned to Zig `0.16.0`.
+
+### Added
+
+- `posthog.defaultIo()` convenience accessor returning the process-wide default `Io`.
+- `docs/ZIG_0_15_COMPAT.md` explaining how to pin `0.1.x` for Zig 0.15.2 users.
+- `docs/MIGRATION_ZIG_0_16.md` documenting every 0.15 -> 0.16 breakage this library hit.
+
+### Verified
+
+- 73/73 tests pass on Zig 0.16.0 (50 unit + 18 caller simulation + 5 live-PostHog integration).
+- Cross-compile clean on `x86_64-linux`, `aarch64-linux`, `x86_64-macos`, `aarch64-macos`.
+- `make memleak` green on darwin.
+
 ## [0.1.3] - 2026-03-08
 
 ### Changed
