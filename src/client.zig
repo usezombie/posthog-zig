@@ -27,8 +27,8 @@ pub const PostHogClient = struct {
     /// Call `client.deinit()` to flush remaining events and free all resources.
     ///
     /// `io` is threaded through concurrency primitives (Io.Mutex, Io.Event) and
-    /// the HTTP client. Use `std.Options.debug_threaded_io.?.io()` for the
-    /// default process-wide Io, or pass your own `std.Io.Threaded`.
+    /// the HTTP client. Pass `posthog.defaultIo()` for the default process-wide
+    /// Io, or construct and pass your own `std.Io.Threaded` for a custom backend.
     pub fn init(allocator: std.mem.Allocator, io: std.Io, config: types.Config) !*PostHogClient {
         const self = try allocator.create(PostHogClient);
         errdefer allocator.destroy(self);
