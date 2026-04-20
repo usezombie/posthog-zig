@@ -89,7 +89,11 @@ pub const FlushThread = struct {
     /// about (bounded network blocking); join is fast once the drain exits.
     pub fn stop(self: *FlushThread, timeout_ms: u64) void {
         const now = std.Io.Clock.awake.now(self.ctx.io).nanoseconds;
-        const timeout_ns: i64 = @intCast(timeout_ms * std.time.ns_per_ms);
+        // Saturating mul: silently wrapping u64*u64 in ReleaseFast (or
+        // panicking in debug) if a caller passes an absurd timeout_ms is
+        // worse than clamping at u64::MAX and letting the @intCast below
+        // police the i64 bound.
+        const timeout_ns: i64 = @intCast(timeout_ms *| std.time.ns_per_ms);
         const deadline: i64 = @intCast(now + timeout_ns);
         self.ctx.shutdown_deadline_ns.store(deadline, .release);
         self.ctx.shutdown.store(true, .release);

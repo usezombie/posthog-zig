@@ -77,13 +77,20 @@ pub const FlagCache = struct {
             }
         }
 
+        // Reserve the slot up front so the later put cannot fail. Without
+        // this, a post-`fetchRemove` OOM would leave the `distinct_id`
+        // entirely absent from the cache — under sustained memory pressure
+        // that silently evicts valid entries and disables the cache for
+        // affected users.
+        try self.entries.ensureUnusedCapacity(1);
+
         // Remove existing entry for this distinct_id if present
         if (self.entries.fetchRemove(distinct_id)) |old| {
             old.value.parsed.deinit();
             self.allocator.free(old.value.distinct_id);
         }
 
-        try self.entries.put(id_copy, entry);
+        self.entries.putAssumeCapacity(id_copy, entry);
     }
 
     /// Returns true if the flag is enabled for this distinct_id.
