@@ -7,7 +7,8 @@
 
 A server-side PostHog analytics client for Zig. Non-blocking event capture with background batch delivery, retry, and graceful shutdown.
 
-- **Zig:** 0.16.x (current). For 0.15.2 users, pin posthog-zig `0.1.x` — see [`docs/v1/ZIG_0_15_COMPAT.md`](docs/v1/ZIG_0_15_COMPAT.md).
+- **Zig:** requires `0.16.0` or newer (tested on the 0.16.x line).
+- **0.15.2 users:** pin posthog-zig `0.1.x` — see [`docs/v1/ZIG_0_15_COMPAT.md`](docs/v1/ZIG_0_15_COMPAT.md).
 - **PostHog API:** `/batch/` (capture) + `/decide/` v3 (feature flags).
 
 ---
