@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //!   const posthog = @import("posthog");
-//!   var client = try posthog.init(allocator, .{ .api_key = "phc_..." });
+//!   var client = try posthog.init(allocator, posthog.defaultIo(), .{ .api_key = "phc_..." });
 //!   defer client.deinit();
 //!   try client.capture(.{ .distinct_id = "user_123", .event = "run_started" });
 

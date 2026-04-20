@@ -2,16 +2,24 @@
 
 const std = @import("std");
 
-/// Thread-local PRNG seeded lazily from nanoTimestamp.
-/// Zig 0.16 removed `std.crypto.random`; retry jitter is non-cryptographic
-/// so a seeded `DefaultPrng` is sufficient and cheap.
+/// Thread-local PRNG lazily seeded from values that do not require an `Io`.
+/// Zig 0.16 removed `std.crypto.random`; retry jitter is non-cryptographic,
+/// so a seeded `DefaultPrng` is sufficient. Seed entropy comes from the
+/// address of the thread-local slot (unique per thread) mixed with a
+/// process-wide atomic counter (unique per init) — no dependency on
+/// `std.Options.debug_threaded_io`, so this works under alternative Io
+/// backends or when no ambient Io is configured at all.
 threadlocal var rng_state: ?std.Random.DefaultPrng = null;
+
+var seed_counter: std.atomic.Value(u64) = .init(0);
 
 fn threadRandom() std.Random {
     if (rng_state == null) {
-        const io = std.Options.debug_threaded_io.?.io();
-        const ts = std.Io.Clock.awake.now(io);
-        const seed: u64 = @bitCast(@as(i64, @truncate(ts.nanoseconds)));
+        const addr_entropy: u64 = @intCast(@intFromPtr(&rng_state));
+        const counter_entropy = seed_counter.fetchAdd(1, .monotonic);
+        // Mix with the 64-bit golden-ratio constant so adjacent counter
+        // values produce well-separated seeds.
+        const seed = addr_entropy ^ (counter_entropy *% 0x9E3779B97F4A7C15);
         rng_state = std.Random.DefaultPrng.init(seed);
     }
     return rng_state.?.random();

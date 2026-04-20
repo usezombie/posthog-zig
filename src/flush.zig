@@ -42,6 +42,11 @@ pub const FlushConfig = struct {
 /// Lives for the full duration of the thread — outlives the spawn() stack frame.
 const ThreadCtx = struct {
     shutdown: std.atomic.Value(bool),
+    /// Monotonic-clock nanoseconds deadline by which the shutdown drain
+    /// must have completed. Zero means "no deadline" (normal operation).
+    /// Published by `stop()` before `queue.signal()` so the flush thread
+    /// sees it before waking.
+    shutdown_deadline_ns: std.atomic.Value(i64),
     queue: *batch.Queue,
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -62,6 +67,7 @@ pub const FlushThread = struct {
         errdefer allocator.destroy(ctx);
         ctx.* = .{
             .shutdown = std.atomic.Value(bool).init(false),
+            .shutdown_deadline_ns = std.atomic.Value(i64).init(0),
             .queue = queue,
             .allocator = allocator,
             .io = io,
@@ -72,15 +78,34 @@ pub const FlushThread = struct {
         return .{ .thread = thread, .ctx = ctx };
     }
 
-    /// Signal shutdown, drain remaining events, and join the thread.
+    /// Signal shutdown, drain remaining events (bounded by `timeout_ms`),
+    /// and join the thread.
+    ///
+    /// `timeout_ms` bounds the final drain's retry budget: once the deadline
+    /// passes, in-flight retries stop sleeping and the thread returns.
+    /// The kernel `join()` itself is not timed — Zig 0.16's `std.Thread` has
+    /// no timed join, and detaching-on-timeout would leak `ctx`. In practice
+    /// the deadline check inside `doFlush` is what the user actually cares
+    /// about (bounded network blocking); join is fast once the drain exits.
     pub fn stop(self: *FlushThread, timeout_ms: u64) void {
-        _ = timeout_ms; // v0.2: implement timed join using timeout_ms
+        const now = std.Io.Clock.awake.now(self.ctx.io).nanoseconds;
+        const timeout_ns: i64 = @intCast(timeout_ms * std.time.ns_per_ms);
+        const deadline: i64 = @intCast(now + timeout_ns);
+        self.ctx.shutdown_deadline_ns.store(deadline, .release);
         self.ctx.shutdown.store(true, .release);
         self.ctx.queue.signal();
         self.thread.join();
         self.ctx.allocator.destroy(self.ctx);
     }
 };
+
+/// Returns true when a shutdown deadline is active and has been crossed.
+fn shutdownDeadlinePassed(ctx: *ThreadCtx) bool {
+    const deadline = ctx.shutdown_deadline_ns.load(.acquire);
+    if (deadline == 0) return false;
+    const now = std.Io.Clock.awake.now(ctx.io).nanoseconds;
+    return @as(i64, @intCast(now)) >= deadline;
+}
 
 fn flushLoop(ctx: *ThreadCtx) void {
     const interval_ns = ctx.config.flush_interval_ms * std.time.ns_per_ms;
@@ -106,6 +131,14 @@ fn doFlush(ctx: *ThreadCtx) void {
 
     var attempt: u32 = 0;
     while (attempt <= ctx.config.max_retries) : (attempt += 1) {
+        // Honour the shutdown deadline: once crossed, stop retrying so
+        // `deinit()` returns within `shutdown_flush_timeout_ms` instead of
+        // blocking for minutes under retry backoff.
+        if (shutdownDeadlinePassed(ctx)) {
+            if (ctx.config.enable_logging) log.warn("[posthog] shutdown deadline passed: dropping {d} events", .{events.len});
+            if (ctx.config.on_deliver) |cb| cb(.dropped, events.len);
+            return;
+        }
         if (attempt > 0) {
             const delay = backoffDelayNs(ctx, attempt - 1, 1000, 30_000);
             if (ctx.config.enable_logging) log.debug("[posthog] retry {d}/{d} in {d}ms", .{ attempt, ctx.config.max_retries, delay / std.time.ns_per_ms });
@@ -179,6 +212,48 @@ test "integration: flush thread starts, processes queue, and stops cleanly" {
     var ft = try FlushThread.spawn(std.testing.allocator, testIo(), &q, cfg);
     testIo().sleep(std.Io.Duration.fromMilliseconds(50), .awake) catch {};
     ft.stop(1000);
+}
+
+test "flush: stop() honours timeout_ms deadline in retry loop" {
+    // A slow sleep_fn simulates a long retry backoff. With max_retries=3
+    // and each retry "sleeping" 10s of wall time, the pre-fix behaviour
+    // would block stop() for ~30s even with timeout_ms=50. The deadline
+    // must short-circuit the loop so the test completes quickly.
+    var q = try batch.Queue.init(std.testing.allocator, testIo(), 8, 8, false);
+    defer q.deinit();
+
+    FlushMock.reset(&.{ 503, 503, 503, 503 });
+    q.enqueue("{\"event\":\"x\",\"properties\":{\"distinct_id\":\"u\"},\"timestamp\":\"1970-01-01T00:00:00.000Z\"}");
+
+    var ctx = ThreadCtx{
+        .shutdown = std.atomic.Value(bool).init(true),
+        .shutdown_deadline_ns = std.atomic.Value(i64).init(0),
+        .queue = &q,
+        .allocator = std.testing.allocator,
+        .io = testIo(),
+        .config = .{
+            .host = "http://unused",
+            .api_key = "phc_test",
+            .enable_logging = false,
+            .flush_interval_ms = 60_000,
+            .max_retries = 3,
+            .on_deliver = FlushMock.onDeliver,
+            .post_batch_fn = FlushMock.postBatch,
+            .backoff_fn = FlushMock.backoff,
+            .sleep_fn = FlushMock.sleep, // does not actually sleep
+        },
+    };
+
+    // Set a deadline that is already in the past so every retry short-circuits.
+    const now = std.Io.Clock.awake.now(testIo()).nanoseconds;
+    ctx.shutdown_deadline_ns.store(@as(i64, @intCast(now)) - 1, .release);
+
+    doFlush(&ctx);
+
+    // With the deadline passed before attempt 0, zero POSTs should run and
+    // the batch must be marked dropped (not retried).
+    try std.testing.expectEqual(@as(usize, 0), FlushMock.post_calls.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), FlushMock.dropped.load(.acquire));
 }
 
 test "integration: flush thread drains queue on shutdown" {
@@ -280,6 +355,7 @@ fn runSingleFlushWithMock(max_retries: u32, seq: []const u16) !void {
 
     var ctx = ThreadCtx{
         .shutdown = std.atomic.Value(bool).init(false),
+        .shutdown_deadline_ns = std.atomic.Value(i64).init(0),
         .queue = &q,
         .allocator = std.testing.allocator,
         .io = testIo(),

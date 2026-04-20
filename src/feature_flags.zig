@@ -62,10 +62,11 @@ pub const FlagCache = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        // Evict one entry if at capacity.
-        // Copy key and entry before remove — remove uses the key to find the slot,
-        // so key memory must still be valid when remove() is called.
-        if (self.entries.count() >= self.max_entries) {
+        // Evict one entry if at capacity — but only if `distinct_id` is a new
+        // key. When it is already present, the subsequent `fetchRemove` path
+        // replaces the entry in place without growing the map, so evicting
+        // another user's entry here would drop a valid cache slot for nothing.
+        if (!self.entries.contains(distinct_id) and self.entries.count() >= self.max_entries) {
             var it = self.entries.iterator();
             if (it.next()) |kv| {
                 const evict_key = kv.key_ptr.*;
@@ -215,6 +216,25 @@ test "feature flags: max_entries eviction" {
     try cache.put("user_3", sample_decide_response); // should evict user_1
 
     try std.testing.expectEqual(@as(usize, 2), cache.entries.count());
+}
+
+test "feature flags: re-put at capacity does not evict other entries" {
+    // Regression: before the eviction-skip fix, put("user_1", new) at
+    // capacity would evict an arbitrary other user *and* replace user_1,
+    // ending at capacity-1 entries with a valid cache slot lost.
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 2);
+    defer cache.deinit();
+
+    try cache.put("user_1", sample_decide_response);
+    try cache.put("user_2", sample_decide_response);
+    try std.testing.expectEqual(@as(usize, 2), cache.entries.count());
+
+    // Update user_1 while at capacity — user_2 must survive.
+    try cache.put("user_1", "{\"featureFlags\":{\"flag-a\":false},\"featureFlagPayloads\":{}}");
+
+    try std.testing.expectEqual(@as(usize, 2), cache.entries.count());
+    try std.testing.expect(cache.isEnabled("user_2", "flag-a").?);
+    try std.testing.expect(!cache.isEnabled("user_1", "flag-a").?);
 }
 
 test "feature flags: re-put same distinct_id replaces entry" {
