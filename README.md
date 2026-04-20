@@ -1,15 +1,14 @@
 # posthog-zig
 
 [![ci](https://github.com/usezombie/posthog-zig/actions/workflows/ci.yml/badge.svg)](https://github.com/usezombie/posthog-zig/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/usezombie/posthog-zig/branch/main/graph/badge.svg)](https://codecov.io/gh/usezombie/posthog-zig)
 [![version](https://img.shields.io/github/v/tag/usezombie/posthog-zig?label=version&sort=semver)](https://github.com/usezombie/posthog-zig/tags)
 [![zig](https://img.shields.io/badge/zig-0.16.x-orange)](https://ziglang.org)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 A server-side PostHog analytics client for Zig. Non-blocking event capture with background batch delivery, retry, and graceful shutdown.
 
-**Zig:** 0.16.x (current). For 0.15.2 users, pin posthog-zig `0.1.x` — see [`docs/v1/ZIG_0_15_COMPAT.md`](docs/v1/ZIG_0_15_COMPAT.md).
-**PostHog API:** `/batch/` (capture) + `/decide/` v3 (feature flags)
+- **Zig:** 0.16.x (current). For 0.15.2 users, pin posthog-zig `0.1.x` — see [`docs/v1/ZIG_0_15_COMPAT.md`](docs/v1/ZIG_0_15_COMPAT.md).
+- **PostHog API:** `/batch/` (capture) + `/decide/` v3 (feature flags).
 
 ---
 
@@ -138,33 +137,27 @@ defer if (payload) |p| allocator.free(p); // caller owns the returned slice
 try client.flush();
 ```
 
-### Integration patterns for calling systems
+### Minimal integration (any Zig daemon)
 
-posthog-zig is a library. It cannot install a panic handler. The calling application
-owns that responsibility.
-
-### Minimal integration (zombied / any Zig daemon)
+posthog-zig is a library; it cannot install a panic handler. The calling
+application owns that responsibility.
 
 ```zig
 // src/main.zig
+const std = @import("std");
 const posthog = @import("posthog");
 
 // Hold the client at application scope so the panic hook can reach it.
 var ph_client: ?*posthog.PostHogClient = null;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    // Init — spawns background flush thread.
-    // Pass null api_key to disable analytics (e.g. when env var is absent).
-    // 0.16: std.posix.getenv was removed; read via the Threaded Io's Environ.
-    const env = std.Options.debug_threaded_io.?.environ.process_environ;
-    if (env.getPosix("POSTHOG_API_KEY")) |key| {
-        ph_client = try posthog.init(allocator, posthog.defaultIo(), .{ .api_key = key });
+// 0.16: main receives an `Init` with the process allocator, Io, and environ.
+// `std.posix.getenv` and free-floating GPAs are gone — read env from
+// `init.environ_map` and pass `init.gpa` / `init.io` into library init.
+pub fn main(init: std.process.Init) !void {
+    if (init.environ_map.get("POSTHOG_API_KEY")) |key| {
+        ph_client = try posthog.init(init.gpa, init.io, .{ .api_key = key });
     }
-    defer if (ph_client) |c| c.deinit(); // deinit frees the heap-allocated client // drains queue on SIGTERM / clean exit
+    defer if (ph_client) |c| c.deinit(); // drains queue on SIGTERM / clean exit
 
     // ... rest of your service
 }
@@ -267,4 +260,4 @@ make memleak
 
 MIT — see [LICENSE](LICENSE).
 
-Built for [usezombie](https://usezombie.com). Used in `zombied` (Zig control plane daemon) for production analytics.
+Built for [usezombie](https://usezombie.com).
