@@ -60,8 +60,19 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, config: Config) !*PostHogC
 /// Convenience accessor for the process-wide default `Io`, populated by
 /// `start.zig` with the real environment and a thread-capable backend. This
 /// is the value to pass as `io` when the caller has no stronger opinion.
+///
+/// Panics with an explicit diagnostic if `std.Options.debug_threaded_io` is
+/// null — e.g. freestanding / embedded builds that omit `start.zig`, or
+/// custom test harnesses. In those contexts, construct and pass an explicit
+/// `std.Io.Threaded` instance instead of calling this helper.
 pub fn defaultIo() std.Io {
-    return std.Options.debug_threaded_io.?.io();
+    const t = std.Options.debug_threaded_io orelse @panic(
+        "posthog.defaultIo() requires std.Options.debug_threaded_io to be set " ++
+            "(populated automatically by start.zig in normal executable builds). " ++
+            "Pass an explicit std.Io (e.g. from a std.Io.Threaded you own) if you " ++
+            "are in a freestanding, embedded, or custom-harness context.",
+    );
+    return t.io();
 }
 
 // ── Pull in all test blocks ───────────────────────────────────────────────────

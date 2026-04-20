@@ -113,7 +113,10 @@ pub const FlagCache = struct {
 
     /// Returns the raw payload string for a flag (caller owns returned slice).
     /// Returns null if not cached, expired, or no payload for this flag.
-    pub fn getPayload(self: *FlagCache, allocator: std.mem.Allocator, distinct_id: []const u8, flag_key: []const u8) ?[]u8 {
+    /// Returns `error.OutOfMemory` on allocation failure — do **not** collapse
+    /// OOM into `null`, because callers treat `null` as a cache miss and will
+    /// issue a redundant `/decide/` round trip under memory pressure.
+    pub fn getPayload(self: *FlagCache, allocator: std.mem.Allocator, distinct_id: []const u8, flag_key: []const u8) std.mem.Allocator.Error!?[]u8 {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
@@ -123,7 +126,7 @@ pub const FlagCache = struct {
         const payloads = getPayloadsObject(entry) orelse return null;
         const val = payloads.get(flag_key) orelse return null;
         return switch (val) {
-            .string => |s| allocator.dupe(u8, s) catch null,
+            .string => |s| try allocator.dupe(u8, s),
             else => null,
         };
     }
@@ -198,7 +201,7 @@ test "feature flags: getPayload returns payload string" {
     defer cache.deinit();
 
     try cache.put("user_123", sample_decide_response);
-    const payload = cache.getPayload(std.testing.allocator, "user_123", "flag-b");
+    const payload = try cache.getPayload(std.testing.allocator, "user_123", "flag-b");
     defer if (payload) |p| std.testing.allocator.free(p);
 
     try std.testing.expect(payload != null);

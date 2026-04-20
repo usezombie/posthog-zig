@@ -9,7 +9,9 @@
         "build.zig.zon",
         "src",
         "tests",
+        "docs",
         "README.md",
+        "CHANGELOG.md",
         "LICENSE",
     },
 }

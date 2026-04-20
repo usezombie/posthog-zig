@@ -100,9 +100,9 @@ pub const PostHogClient = struct {
     }
 
     pub fn getFeatureFlagPayload(self: *PostHogClient, flag_key: []const u8, distinct_id: []const u8) !?[]u8 {
-        if (self.flag_cache.getPayload(self.allocator, distinct_id, flag_key)) |p| return p;
+        if (try self.flag_cache.getPayload(self.allocator, distinct_id, flag_key)) |p| return p;
         try feature_flags.fetchAndCache(&self.flag_cache, self.allocator, self.io, self.config.host, self.config.api_key, distinct_id);
-        return self.flag_cache.getPayload(self.allocator, distinct_id, flag_key);
+        return try self.flag_cache.getPayload(self.allocator, distinct_id, flag_key);
     }
 
     /// Flush pending events synchronously.
