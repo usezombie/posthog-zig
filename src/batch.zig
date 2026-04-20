@@ -17,6 +17,16 @@
 //! (drop-newest). The arena cannot free individual entries; all memory for a
 //! side is reclaimed together on reset after successful delivery.
 //!
+//! Concurrency:
+//!   - `mutex` (std.Io.Mutex) guards `write_idx`, `count`, `dropped`, and
+//!     arena allocation. ArenaAllocator is lock-free on its own, but the
+//!     mutex is shared with the indices/counters it sits next to, so it
+//!     stays.
+//!   - `wake` (std.Io.Event) is the flush-thread wakeup signal. `Io.Condition`
+//!     has no `timedWait`, so the timed-wait path is expressed via
+//!     `Event.waitTimeout`. Single consumer (the flush thread) calls
+//!     `reset()` after each wake-up; producers only call `set()`.
+//!
 //! See docs/ARCHITECTURE.md for design rationale and v0.2 plans.
 
 const std = @import("std");
@@ -66,25 +76,33 @@ pub const DrainResult = struct {
 
 pub const Queue = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     sides: [2]Side,
     write_idx: u1,
-    mutex: std.Thread.Mutex,
-    cond: std.Thread.Condition,
+    mutex: std.Io.Mutex,
+    wake: std.Io.Event,
     max_size: usize,
     flush_at: usize,
     log_enabled: bool,
     dropped: u64,
 
-    pub fn init(gpa: std.mem.Allocator, max_size: usize, flush_at: usize, log_enabled: bool) !Queue {
+    pub fn init(
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        max_size: usize,
+        flush_at: usize,
+        log_enabled: bool,
+    ) !Queue {
         var side_a = try Side.init(gpa, max_size);
         errdefer side_a.deinit(gpa);
         const side_b = try Side.init(gpa, max_size);
         return .{
             .gpa = gpa,
+            .io = io,
             .sides = .{ side_a, side_b },
             .write_idx = 0,
-            .mutex = .{},
-            .cond = .{},
+            .mutex = .init,
+            .wake = .unset,
             .max_size = max_size,
             .flush_at = flush_at,
             .log_enabled = log_enabled,
@@ -100,28 +118,35 @@ pub const Queue = struct {
     /// Enqueue a serialized event JSON string. Non-blocking.
     /// Copies json into the write-side arena. Drops the event if at capacity.
     pub fn enqueue(self: *Queue, json: []const u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        const need_wake = blk: {
+            defer self.mutex.unlock(self.io);
 
-        const side = &self.sides[self.write_idx];
+            const side = &self.sides[self.write_idx];
 
-        if (side.count >= self.max_size) {
-            self.dropped += 1;
-            if (self.log_enabled) log.warn("[posthog] queue full: event dropped (total dropped: {d})", .{self.dropped});
-            return;
-        }
+            if (side.count >= self.max_size) {
+                self.dropped += 1;
+                if (self.log_enabled) log.warn("[posthog] queue full: event dropped (total dropped: {d})", .{self.dropped});
+                break :blk false;
+            }
 
-        const owned = side.arena.allocator().dupe(u8, json) catch {
-            if (self.log_enabled) log.warn("[posthog] enqueue: arena alloc failed, event dropped", .{});
-            return;
+            const owned = side.arena.allocator().dupe(u8, json) catch {
+                if (self.log_enabled) log.warn("[posthog] enqueue: arena alloc failed, event dropped", .{});
+                break :blk false;
+            };
+
+            side.events[side.count] = owned;
+            side.count += 1;
+
+            break :blk side.count >= self.flush_at;
         };
 
-        side.events[side.count] = owned;
-        side.count += 1;
-
-        if (side.count >= self.flush_at) {
-            self.cond.signal();
-        }
+        // Deliberately set the wake event **after** releasing the mutex
+        // (unlock runs in the `blk:` defer). Signalling under the lock would
+        // wake the flush thread only for it to immediately block on the same
+        // mutex we still hold; doing it here avoids that thundering-herd
+        // stall. Safe because Event.set has release semantics.
+        if (need_wake) self.wake.set(self.io);
     }
 
     /// Swap write and flush sides atomically (O(1) under mutex).
@@ -130,8 +155,8 @@ pub const Queue = struct {
     /// The flush thread owns the returned side exclusively — no lock needed
     /// between drain() and resetSide().
     pub fn drain(self: *Queue) DrainResult {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         const flush_idx = self.write_idx;
         self.write_idx ^= 1;
@@ -150,38 +175,44 @@ pub const Queue = struct {
     }
 
     pub fn pendingCount(self: *Queue) usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         return self.sides[0].count + self.sides[1].count;
     }
 
     pub fn droppedCount(self: *Queue) u64 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         return self.dropped;
     }
 
-    /// Block until events are available or timeout expires.
+    /// Block until the wake event is set or timeout expires. Reset after.
+    /// Only the single flush-thread consumer calls this.
     pub fn waitForEventsOrTimeout(self: *Queue, timeout_ns: u64) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        if (self.sides[self.write_idx].count == 0) {
-            self.cond.timedWait(&self.mutex, timeout_ns) catch {};
-        }
+        const timeout: std.Io.Timeout = .{ .duration = .{
+            .raw = std.Io.Duration.fromNanoseconds(@intCast(timeout_ns)),
+            .clock = .awake,
+        } };
+        self.wake.waitTimeout(self.io, timeout) catch {};
+        self.wake.reset();
     }
 
     /// Wake the flush thread immediately (e.g. on shutdown).
     pub fn signal(self: *Queue) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        self.cond.broadcast();
+        self.wake.set(self.io);
     }
 };
+
+// ── Test helpers ──────────────────────────────────────────────────────────────
+
+fn testIo() std.Io {
+    return std.Options.debug_threaded_io.?.io();
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 test "queue: enqueue and drain single event" {
-    var q = try Queue.init(std.testing.allocator, 10, 5, false);
+    var q = try Queue.init(std.testing.allocator, testIo(), 10, 5, false);
     defer q.deinit();
 
     q.enqueue("{\"event\":\"test\"}");
@@ -191,14 +222,13 @@ test "queue: enqueue and drain single event" {
 
     try std.testing.expectEqual(@as(usize, 1), r.events.len);
     try std.testing.expectEqualStrings("{\"event\":\"test\"}", r.events[0]);
-    // pendingCount includes in-flight (drained but not yet reset) events
     try std.testing.expectEqual(@as(usize, 1), q.pendingCount());
     q.resetSide(r.side_idx);
     try std.testing.expectEqual(@as(usize, 0), q.pendingCount());
 }
 
 test "queue: drain from empty returns empty" {
-    var q = try Queue.init(std.testing.allocator, 10, 5, false);
+    var q = try Queue.init(std.testing.allocator, testIo(), 10, 5, false);
     defer q.deinit();
 
     const r = q.drain();
@@ -208,7 +238,7 @@ test "queue: drain from empty returns empty" {
 }
 
 test "queue: overflow drops newest event" {
-    var q = try Queue.init(std.testing.allocator, 2, 100, false);
+    var q = try Queue.init(std.testing.allocator, testIo(), 2, 100, false);
     defer q.deinit();
 
     q.enqueue("first");
@@ -226,10 +256,9 @@ test "queue: overflow drops newest event" {
 }
 
 test "queue: arena resets cleanly across two flush cycles" {
-    var q = try Queue.init(std.testing.allocator, 10, 100, false);
+    var q = try Queue.init(std.testing.allocator, testIo(), 10, 100, false);
     defer q.deinit();
 
-    // Cycle 1
     q.enqueue("{\"event\":\"a\"}");
     q.enqueue("{\"event\":\"b\"}");
     {
@@ -238,7 +267,6 @@ test "queue: arena resets cleanly across two flush cycles" {
         try std.testing.expectEqual(@as(usize, 2), r.events.len);
     }
 
-    // Cycle 2 — write side flipped then available again after reset
     q.enqueue("{\"event\":\"c\"}");
     {
         const r = q.drain();
@@ -249,10 +277,9 @@ test "queue: arena resets cleanly across two flush cycles" {
 }
 
 test "queue: multiple drain cycles accumulate no memory" {
-    var q = try Queue.init(std.testing.allocator, 100, 200, false);
+    var q = try Queue.init(std.testing.allocator, testIo(), 100, 200, false);
     defer q.deinit();
 
-    // 10 flush cycles with 5 events each — all arena memory reclaimed per cycle
     for (0..10) |_| {
         for (0..5) |_| q.enqueue("{\"event\":\"x\"}");
         const r = q.drain();
@@ -263,8 +290,35 @@ test "queue: multiple drain cycles accumulate no memory" {
     try std.testing.expectEqual(@as(u64, 0), q.droppedCount());
 }
 
+test "queue: waitForEventsOrTimeout returns promptly when wake is pre-set" {
+    // Regression guard for the Io.Event replacement of Io.Condition.timedWait:
+    // set() before wait() must be observed (event is sticky until reset()).
+    var q = try Queue.init(std.testing.allocator, testIo(), 10, 5, false);
+    defer q.deinit();
+
+    q.signal(); // pre-set wake
+
+    const t0 = std.Io.Clock.awake.now(testIo()).nanoseconds;
+    q.waitForEventsOrTimeout(5 * std.time.ns_per_s); // 5s timeout, must return immediately
+    const elapsed_ns = std.Io.Clock.awake.now(testIo()).nanoseconds - t0;
+    try std.testing.expect(elapsed_ns < 500 * std.time.ns_per_ms);
+}
+
+test "queue: waitForEventsOrTimeout honours the timeout when no wake fires" {
+    var q = try Queue.init(std.testing.allocator, testIo(), 10, 5, false);
+    defer q.deinit();
+
+    const t0 = std.Io.Clock.awake.now(testIo()).nanoseconds;
+    q.waitForEventsOrTimeout(20 * std.time.ns_per_ms);
+    const elapsed_ns = std.Io.Clock.awake.now(testIo()).nanoseconds - t0;
+    // Must have waited at least ~15ms (lower bound is looser than upper) and
+    // must not have blocked for anywhere near test-timeout limits.
+    try std.testing.expect(elapsed_ns >= 15 * std.time.ns_per_ms);
+    try std.testing.expect(elapsed_ns < 1 * std.time.ns_per_s);
+}
+
 test "integration: concurrent producers enqueue without data race" {
-    var q = try Queue.init(std.testing.allocator, 1000, 500, false);
+    var q = try Queue.init(std.testing.allocator, testIo(), 1000, 500, false);
     defer q.deinit();
 
     const N = 4;

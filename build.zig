@@ -56,7 +56,7 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
-        b.step("test", "Run unit + integration tests").dependOn(&b.addRunArtifact(int_tests).step);
+        test_step.dependOn(&b.addRunArtifact(int_tests).step);
     }
 
     // ── Test binary for kcov coverage ────────────────────────────────────────

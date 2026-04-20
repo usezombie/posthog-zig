@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - run: make lint
 
   # ── Unit tests ────────────────────────────────────────────────────────────
@@ -22,11 +22,11 @@ jobs:
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - run: make test-unit
 
   # ── Line coverage (llvm-cov + Codecov) ──────────────────────────────────
-  # kcov v43 cannot parse Zig 0.15.x DWARF (DWARF v5 incompatibility).
+  # kcov v43 cannot parse Zig 0.16.x DWARF (DWARF v5 incompatibility).
   # llvm-cov is attempted; falls back to a synthetic placeholder report
   # (2.20%) if the binary lacks profiling instrumentation.
   coverage:
@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - name: Run coverage gate
         run: make coverage
       - name: Upload to Codecov
@@ -76,7 +76,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - name: Run memleak gate
         run: make memleak
 
@@ -95,7 +95,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - name: Build ${{ matrix.target }}
         run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
       - name: Verify no external C deps

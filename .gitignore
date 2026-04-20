@@ -3,3 +3,6 @@ zig-out/
 .tmp/
 coverage/
 *.env
+# Worktree-local mise toolchain pins (CI workflow is the source of truth for Zig version)
+mise.toml
+.mise.toml

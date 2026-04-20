@@ -17,6 +17,7 @@ const log = std.log.scoped(.posthog);
 
 const PostBatchFn = *const fn (
     allocator: std.mem.Allocator,
+    io: std.Io,
     host: []const u8,
     api_key: []const u8,
     events: []const []const u8,
@@ -41,8 +42,14 @@ pub const FlushConfig = struct {
 /// Lives for the full duration of the thread — outlives the spawn() stack frame.
 const ThreadCtx = struct {
     shutdown: std.atomic.Value(bool),
+    /// Monotonic-clock nanoseconds deadline by which the shutdown drain
+    /// must have completed. Zero means "no deadline" (normal operation).
+    /// Published by `stop()` before `queue.signal()` so the flush thread
+    /// sees it before waking.
+    shutdown_deadline_ns: std.atomic.Value(i64),
     queue: *batch.Queue,
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: FlushConfig,
 };
 
@@ -52,6 +59,7 @@ pub const FlushThread = struct {
 
     pub fn spawn(
         allocator: std.mem.Allocator,
+        io: std.Io,
         queue: *batch.Queue,
         config: FlushConfig,
     ) !FlushThread {
@@ -59,8 +67,10 @@ pub const FlushThread = struct {
         errdefer allocator.destroy(ctx);
         ctx.* = .{
             .shutdown = std.atomic.Value(bool).init(false),
+            .shutdown_deadline_ns = std.atomic.Value(i64).init(0),
             .queue = queue,
             .allocator = allocator,
+            .io = io,
             .config = config,
         };
 
@@ -68,11 +78,36 @@ pub const FlushThread = struct {
         return .{ .thread = thread, .ctx = ctx };
     }
 
-    /// Signal shutdown, drain remaining events, and join the thread.
-    /// In v0.1, join is unbounded — the thread always runs to completion.
-    /// timeout_ms is accepted for API stability but not enforced until v0.2.
+    /// Signal shutdown, drain remaining events (bounded by `timeout_ms`),
+    /// and join the thread.
+    ///
+    /// `timeout_ms` bounds the final drain's retry budget: once the deadline
+    /// passes, in-flight retries stop sleeping and the thread returns.
+    /// The kernel `join()` itself is not timed — Zig 0.16's `std.Thread` has
+    /// no timed join, and detaching-on-timeout would leak `ctx`. In practice
+    /// the deadline check inside `doFlush` is what the user actually cares
+    /// about (bounded network blocking); join is fast once the drain exits.
     pub fn stop(self: *FlushThread, timeout_ms: u64) void {
-        _ = timeout_ms; // v0.2: implement timed join using timeout_ms
+        const now = std.Io.Clock.awake.now(self.ctx.io).nanoseconds;
+        // Saturating mul: silently wrapping u64*u64 in ReleaseFast (or
+        // panicking in debug) if a caller passes an absurd timeout_ms is
+        // worse than clamping at u64::MAX and letting the @intCast below
+        // police the i64 bound.
+        // Saturating mul caps the u64 product at u64::MAX on absurd inputs,
+        // then @min clamps to i64::MAX so the @intCast never panics — the
+        // contract is "any `timeout_ms` is accepted; impossibly large values
+        // resolve to an effectively-infinite deadline" rather than a debug
+        // crash.
+        const timeout_ns: i64 = @intCast(@min(
+            timeout_ms *| std.time.ns_per_ms,
+            @as(u64, std.math.maxInt(i64)),
+        ));
+        // `now` is `i96` (from `Io.Timestamp.nanoseconds`), `timeout_ns` is
+        // `i64`. Zig 0.16 implicitly widens the smaller integer on mixed-type
+        // addition, so the sum is `i96`; the final `@intCast` brings it back
+        // to `i64` (safe: monotonic-boot ns fits in i64 for ~292 years).
+        const deadline: i64 = @intCast(now + timeout_ns);
+        self.ctx.shutdown_deadline_ns.store(deadline, .release);
         self.ctx.shutdown.store(true, .release);
         self.ctx.queue.signal();
         self.thread.join();
@@ -80,8 +115,19 @@ pub const FlushThread = struct {
     }
 };
 
+/// Returns true when a shutdown deadline is active and has been crossed.
+fn shutdownDeadlinePassed(ctx: *ThreadCtx) bool {
+    const deadline = ctx.shutdown_deadline_ns.load(.acquire);
+    if (deadline == 0) return false;
+    const now = std.Io.Clock.awake.now(ctx.io).nanoseconds;
+    return @as(i64, @intCast(now)) >= deadline;
+}
+
 fn flushLoop(ctx: *ThreadCtx) void {
-    const interval_ns = ctx.config.flush_interval_ms * std.time.ns_per_ms;
+    // Saturating mul matches `stop()`: an absurd `flush_interval_ms` saturates
+    // at u64::MAX instead of wrapping silently in ReleaseFast (which would
+    // make the timer appear to fire every iteration).
+    const interval_ns = ctx.config.flush_interval_ms *| std.time.ns_per_ms;
 
     while (!ctx.shutdown.load(.acquire)) {
         ctx.queue.waitForEventsOrTimeout(interval_ns);
@@ -94,10 +140,8 @@ fn flushLoop(ctx: *ThreadCtx) void {
 }
 
 fn doFlush(ctx: *ThreadCtx) void {
-    // Swap write↔flush sides atomically. Flush thread owns the returned side
-    // exclusively — no lock contention during HTTP delivery.
     const result = ctx.queue.drain();
-    defer ctx.queue.resetSide(result.side_idx); // one arena reset after delivery
+    defer ctx.queue.resetSide(result.side_idx);
 
     const events = result.events;
     if (events.len == 0) return;
@@ -106,6 +150,14 @@ fn doFlush(ctx: *ThreadCtx) void {
 
     var attempt: u32 = 0;
     while (attempt <= ctx.config.max_retries) : (attempt += 1) {
+        // Honour the shutdown deadline: once crossed, stop retrying so
+        // `deinit()` returns within `shutdown_flush_timeout_ms` instead of
+        // blocking for minutes under retry backoff.
+        if (shutdownDeadlinePassed(ctx)) {
+            if (ctx.config.enable_logging) log.warn("[posthog] shutdown deadline passed: dropping {d} events", .{events.len});
+            if (ctx.config.on_deliver) |cb| cb(.dropped, events.len);
+            return;
+        }
         if (attempt > 0) {
             const delay = backoffDelayNs(ctx, attempt - 1, 1000, 30_000);
             if (ctx.config.enable_logging) log.debug("[posthog] retry {d}/{d} in {d}ms", .{ attempt, ctx.config.max_retries, delay / std.time.ns_per_ms });
@@ -128,7 +180,6 @@ fn doFlush(ctx: *ThreadCtx) void {
             continue;
         }
 
-        // 4xx (not 429): bad data, don't retry
         if (ctx.config.enable_logging) log.warn("[posthog] batch rejected ({d}): dropping {d} events", .{ status, events.len });
         if (ctx.config.on_deliver) |cb| cb(.failed, events.len);
         return;
@@ -139,8 +190,8 @@ fn doFlush(ctx: *ThreadCtx) void {
 }
 
 fn postBatch(ctx: *ThreadCtx, events: []const []const u8) transport.TransportError!u16 {
-    if (ctx.config.post_batch_fn) |f| return f(ctx.allocator, ctx.config.host, ctx.config.api_key, events);
-    return transport.postBatch(ctx.allocator, ctx.config.host, ctx.config.api_key, events);
+    if (ctx.config.post_batch_fn) |f| return f(ctx.allocator, ctx.io, ctx.config.host, ctx.config.api_key, events);
+    return transport.postBatch(ctx.allocator, ctx.io, ctx.config.host, ctx.config.api_key, events);
 }
 
 fn backoffDelayNs(ctx: *ThreadCtx, attempt: u32, base_ms: u64, max_ms: u64) u64 {
@@ -153,13 +204,17 @@ fn sleepForNs(ctx: *ThreadCtx, ns: u64) void {
         f(ns);
         return;
     }
-    std.Thread.sleep(ns);
+    ctx.io.sleep(std.Io.Duration.fromNanoseconds(@intCast(ns)), .awake) catch {};
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+fn testIo() std.Io {
+    return std.Options.debug_threaded_io.?.io();
+}
+
 test "integration: flush thread starts, processes queue, and stops cleanly" {
-    var q = try batch.Queue.init(std.testing.allocator, 100, 50, false);
+    var q = try batch.Queue.init(std.testing.allocator, testIo(), 100, 50, false);
     defer q.deinit();
 
     const cfg = FlushConfig{
@@ -171,18 +226,118 @@ test "integration: flush thread starts, processes queue, and stops cleanly" {
         .on_deliver = null,
     };
 
-    // Enqueue a few events — they will fail delivery (no real key) but thread must not crash
     q.enqueue("{\"event\":\"test\",\"properties\":{\"distinct_id\":\"u1\"},\"timestamp\":\"1970-01-01T00:00:00.000Z\"}");
 
-    var ft = try FlushThread.spawn(std.testing.allocator, &q, cfg);
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    var ft = try FlushThread.spawn(std.testing.allocator, testIo(), &q, cfg);
+    testIo().sleep(std.Io.Duration.fromMilliseconds(50), .awake) catch {};
     ft.stop(1000);
+}
 
-    // Thread must have fully joined — no dangling state
+test "flush: stop() honours timeout_ms deadline in retry loop" {
+    // A slow sleep_fn simulates a long retry backoff. With max_retries=3
+    // and each retry "sleeping" 10s of wall time, the pre-fix behaviour
+    // would block stop() for ~30s even with timeout_ms=50. The deadline
+    // must short-circuit the loop so the test completes quickly.
+    var q = try batch.Queue.init(std.testing.allocator, testIo(), 8, 8, false);
+    defer q.deinit();
+
+    FlushMock.reset(&.{ 503, 503, 503, 503 });
+    q.enqueue("{\"event\":\"x\",\"properties\":{\"distinct_id\":\"u\"},\"timestamp\":\"1970-01-01T00:00:00.000Z\"}");
+
+    var ctx = ThreadCtx{
+        .shutdown = std.atomic.Value(bool).init(true),
+        .shutdown_deadline_ns = std.atomic.Value(i64).init(0),
+        .queue = &q,
+        .allocator = std.testing.allocator,
+        .io = testIo(),
+        .config = .{
+            .host = "http://unused",
+            .api_key = "phc_test",
+            .enable_logging = false,
+            .flush_interval_ms = 60_000,
+            .max_retries = 3,
+            .on_deliver = FlushMock.onDeliver,
+            .post_batch_fn = FlushMock.postBatch,
+            .backoff_fn = FlushMock.backoff,
+            .sleep_fn = FlushMock.sleep, // does not actually sleep
+        },
+    };
+
+    // Set a deadline that is already in the past so every retry short-circuits.
+    const now = std.Io.Clock.awake.now(testIo()).nanoseconds;
+    ctx.shutdown_deadline_ns.store(@as(i64, @intCast(now)) - 1, .release);
+
+    doFlush(&ctx);
+
+    // With the deadline passed before attempt 0, zero POSTs should run and
+    // the batch must be marked dropped (not retried).
+    try std.testing.expectEqual(@as(usize, 0), FlushMock.post_calls.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), FlushMock.dropped.load(.acquire));
+}
+
+test "flush: deadline crossed mid-retry stops further attempts" {
+    // Realistic shutdown path: attempt 0 runs and returns 503; before
+    // attempt 1 the deadline is moved into the past, so the loop must
+    // short-circuit to `.dropped` rather than issuing attempt 1.
+    var q = try batch.Queue.init(std.testing.allocator, testIo(), 8, 8, false);
+    defer q.deinit();
+
+    FlushMock.reset(&.{ 503, 200, 200 });
+    q.enqueue("{\"event\":\"x\",\"properties\":{\"distinct_id\":\"u\"},\"timestamp\":\"1970-01-01T00:00:00.000Z\"}");
+
+    const PostOnceThenDeadline = struct {
+        fn postBatch(
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            host: []const u8,
+            api_key: []const u8,
+            events: []const []const u8,
+        ) transport.TransportError!u16 {
+            const status = try FlushMock.postBatch(allocator, io, host, api_key, events);
+            // After attempt 0 returns, move the deadline into the past so
+            // the next iteration sees `shutdownDeadlinePassed == true`.
+            const ctx_deadline = &captured_ctx.?.shutdown_deadline_ns;
+            ctx_deadline.store(1, .release);
+            return status;
+        }
+
+        var captured_ctx: ?*ThreadCtx = null;
+    };
+
+    var ctx = ThreadCtx{
+        .shutdown = std.atomic.Value(bool).init(true),
+        .shutdown_deadline_ns = std.atomic.Value(i64).init(std.math.maxInt(i64)),
+        .queue = &q,
+        .allocator = std.testing.allocator,
+        .io = testIo(),
+        .config = .{
+            .host = "http://unused",
+            .api_key = "phc_test",
+            .enable_logging = false,
+            .flush_interval_ms = 60_000,
+            .max_retries = 5,
+            .on_deliver = FlushMock.onDeliver,
+            .post_batch_fn = PostOnceThenDeadline.postBatch,
+            .backoff_fn = FlushMock.backoff,
+            .sleep_fn = FlushMock.sleep,
+        },
+    };
+    PostOnceThenDeadline.captured_ctx = &ctx;
+    defer PostOnceThenDeadline.captured_ctx = null;
+
+    doFlush(&ctx);
+
+    // Exactly one POST (attempt 0 before deadline was moved).
+    try std.testing.expectEqual(@as(usize, 1), FlushMock.post_calls.load(.acquire));
+    // No deliveries, no failed-non-retry — the batch is `.dropped` via the
+    // deadline short-circuit.
+    try std.testing.expectEqual(@as(usize, 0), FlushMock.delivered.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), FlushMock.failed.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), FlushMock.dropped.load(.acquire));
 }
 
 test "integration: flush thread drains queue on shutdown" {
-    var q = try batch.Queue.init(std.testing.allocator, 100, 200, false); // flush_at=200 so timer won't auto-flush
+    var q = try batch.Queue.init(std.testing.allocator, testIo(), 100, 200, false);
     defer q.deinit();
 
     for (0..5) |_| {
@@ -193,15 +348,14 @@ test "integration: flush thread drains queue on shutdown" {
         .host = "https://us.i.posthog.com",
         .api_key = "phc_test_noop",
         .enable_logging = false,
-        .flush_interval_ms = 60_000, // very long so only shutdown triggers flush
+        .flush_interval_ms = 60_000,
         .max_retries = 0,
         .on_deliver = null,
     };
 
-    var ft = try FlushThread.spawn(std.testing.allocator, &q, cfg);
+    var ft = try FlushThread.spawn(std.testing.allocator, testIo(), &q, cfg);
     ft.stop(2000);
 
-    // After stop(), queue should be drained (events were attempted, either delivered or dropped)
     try std.testing.expectEqual(@as(usize, 0), q.pendingCount());
 }
 
@@ -232,11 +386,13 @@ const FlushMock = struct {
 
     fn postBatch(
         allocator: std.mem.Allocator,
+        io: std.Io,
         host: []const u8,
         api_key: []const u8,
         events: []const []const u8,
     ) transport.TransportError!u16 {
         _ = allocator;
+        _ = io;
         _ = host;
         _ = api_key;
         _ = events;
@@ -271,7 +427,7 @@ const FlushMock = struct {
 };
 
 fn runSingleFlushWithMock(max_retries: u32, seq: []const u16) !void {
-    var q = try batch.Queue.init(std.testing.allocator, 8, 8, false);
+    var q = try batch.Queue.init(std.testing.allocator, testIo(), 8, 8, false);
     defer q.deinit();
 
     FlushMock.reset(seq);
@@ -279,8 +435,10 @@ fn runSingleFlushWithMock(max_retries: u32, seq: []const u16) !void {
 
     var ctx = ThreadCtx{
         .shutdown = std.atomic.Value(bool).init(false),
+        .shutdown_deadline_ns = std.atomic.Value(i64).init(0),
         .queue = &q,
         .allocator = std.testing.allocator,
+        .io = testIo(),
         .config = .{
             .host = "http://unused",
             .api_key = "phc_test",

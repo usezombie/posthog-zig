@@ -2,8 +2,20 @@
 
 const std = @import("std");
 
-pub const version = "0.1.0";
+pub const version = "0.2.0";
 pub const lib_name = "posthog-zig";
+
+/// Epoch-milliseconds timestamp backed by `std.Io.Clock.real`.
+pub fn nowMs(io: std.Io) i64 {
+    const ts = std.Io.Clock.real.now(io);
+    return @intCast(@divTrunc(ts.nanoseconds, std.time.ns_per_ms));
+}
+
+/// Monotonic-clock nanoseconds backed by `std.Io.Clock.awake`.
+pub fn monotonicNs(io: std.Io) i64 {
+    const ts = std.Io.Clock.awake.now(io);
+    return @intCast(ts.nanoseconds);
+}
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -137,8 +149,10 @@ pub fn formatIso8601(writer: anytype, epoch_ms: i64) !void {
     const m: i64 = if (mp < 10) mp + 3 else mp - 9;
     const year: i64 = if (m <= 2) y + 1 else y;
 
-    // Cast to u64 — Zig 0.15 prints explicit '+' sign for i64 with zero-pad format.
-    // All values are guaranteed non-negative for post-epoch timestamps.
+    // Cast to u64: formatIso8601 only handles post-epoch timestamps where
+    // year/month/day are non-negative. The unsigned cast keeps the output
+    // deterministic regardless of any future Zig change to signed
+    // zero-pad formatting (e.g. a leading '+' on positive i64 values).
     try writer.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
         @as(u64, @intCast(year)), @as(u64, @intCast(m)), @as(u64, @intCast(d)),
         h,                        mn,                    s,
@@ -148,22 +162,42 @@ pub fn formatIso8601(writer: anytype, epoch_ms: i64) !void {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+test "nowMs: returns a plausible post-2020 epoch-ms timestamp" {
+    // Jan 1 2020 00:00 UTC in epoch-ms. Anything below this means the clock
+    // facade is returning seconds or garbage — a regression worth catching.
+    const jan_2020_ms: i64 = 1_577_836_800_000;
+    const now = nowMs(std.Options.debug_threaded_io.?.io());
+    try std.testing.expect(now > jan_2020_ms);
+}
+
+test "monotonicNs: is monotonic and advances across calls" {
+    const io = std.Options.debug_threaded_io.?.io();
+    const t0 = monotonicNs(io);
+    // Busy-loop briefly so the clock has to advance on every platform.
+    var sink: u64 = 0;
+    var i: usize = 0;
+    while (i < 10_000) : (i += 1) sink +%= i;
+    std.mem.doNotOptimizeAway(sink);
+    const t1 = monotonicNs(io);
+    try std.testing.expect(t1 >= t0);
+}
+
 test "formatIso8601: epoch zero" {
-    var aw = std.io.Writer.Allocating.init(std.testing.allocator);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
     try formatIso8601(&aw.writer, 0);
     try std.testing.expectEqualStrings("1970-01-01T00:00:00.000Z", aw.written());
 }
 
 test "formatIso8601: one day" {
-    var aw = std.io.Writer.Allocating.init(std.testing.allocator);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
     try formatIso8601(&aw.writer, 86_400_000);
     try std.testing.expectEqualStrings("1970-01-02T00:00:00.000Z", aw.written());
 }
 
 test "formatIso8601: milliseconds preserved" {
-    var aw = std.io.Writer.Allocating.init(std.testing.allocator);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
     try formatIso8601(&aw.writer, 1_500);
     try std.testing.expectEqualStrings("1970-01-01T00:00:01.500Z", aw.written());
@@ -177,28 +211,28 @@ test "ExceptionLevel.string" {
 }
 
 test "writeJsonStr: plain string" {
-    var aw = std.io.Writer.Allocating.init(std.testing.allocator);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
     try writeJsonStr(&aw.writer, "hello");
     try std.testing.expectEqualStrings("\"hello\"", aw.written());
 }
 
 test "writeJsonStr: special chars escaped" {
-    var aw = std.io.Writer.Allocating.init(std.testing.allocator);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
     try writeJsonStr(&aw.writer, "say \"hi\"");
     try std.testing.expectEqualStrings("\"say \\\"hi\\\"\"", aw.written());
 }
 
 test "writePropertyValue: integer negative" {
-    var aw = std.io.Writer.Allocating.init(std.testing.allocator);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
     try writePropertyValue(&aw.writer, .{ .integer = -42 });
     try std.testing.expectEqualStrings("-42", aw.written());
 }
 
 test "writeJsonStr: control chars encoded as \\uXXXX" {
-    var aw = std.io.Writer.Allocating.init(std.testing.allocator);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
     try writeJsonStr(&aw.writer, "\x00");
     try std.testing.expectEqualStrings("\"\\u0000\"", aw.written());
@@ -211,7 +245,7 @@ test "writeJsonStr: control chars encoded as \\uXXXX" {
 }
 
 test "writePropertyValue: boolean" {
-    var aw = std.io.Writer.Allocating.init(std.testing.allocator);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
     try writePropertyValue(&aw.writer, .{ .boolean = true });
     try std.testing.expectEqualStrings("true", aw.written());

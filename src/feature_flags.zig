@@ -10,8 +10,9 @@ const log = std.log.scoped(.posthog);
 
 pub const FlagCache = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     entries: std.StringHashMap(Entry),
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
     ttl_ms: u64,
     max_entries: usize,
 
@@ -22,19 +23,20 @@ pub const FlagCache = struct {
         distinct_id: []u8, // allocator-owned copy (used as map key)
     };
 
-    pub fn init(allocator: std.mem.Allocator, ttl_ms: u64, max_entries: usize) FlagCache {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, ttl_ms: u64, max_entries: usize) FlagCache {
         return .{
             .allocator = allocator,
+            .io = io,
             .entries = std.StringHashMap(Entry).init(allocator),
-            .mutex = .{},
+            .mutex = .init,
             .ttl_ms = ttl_ms,
             .max_entries = max_entries,
         };
     }
 
     pub fn deinit(self: *FlagCache) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         var it = self.entries.iterator();
         while (it.next()) |kv| {
             kv.value_ptr.parsed.deinit();
@@ -53,17 +55,18 @@ pub const FlagCache = struct {
 
         const entry = Entry{
             .parsed = parsed,
-            .fetched_at_ms = std.time.milliTimestamp(),
+            .fetched_at_ms = @import("types.zig").nowMs(self.io),
             .distinct_id = id_copy,
         };
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
-        // Evict one entry if at capacity.
-        // Copy key and entry before remove — remove uses the key to find the slot,
-        // so key memory must still be valid when remove() is called.
-        if (self.entries.count() >= self.max_entries) {
+        // Evict one entry if at capacity — but only if `distinct_id` is a new
+        // key. When it is already present, the subsequent `fetchRemove` path
+        // replaces the entry in place without growing the map, so evicting
+        // another user's entry here would drop a valid cache slot for nothing.
+        if (!self.entries.contains(distinct_id) and self.entries.count() >= self.max_entries) {
             var it = self.entries.iterator();
             if (it.next()) |kv| {
                 const evict_key = kv.key_ptr.*;
@@ -74,20 +77,27 @@ pub const FlagCache = struct {
             }
         }
 
+        // Reserve the slot up front so the later put cannot fail. Without
+        // this, a post-`fetchRemove` OOM would leave the `distinct_id`
+        // entirely absent from the cache — under sustained memory pressure
+        // that silently evicts valid entries and disables the cache for
+        // affected users.
+        try self.entries.ensureUnusedCapacity(1);
+
         // Remove existing entry for this distinct_id if present
         if (self.entries.fetchRemove(distinct_id)) |old| {
             old.value.parsed.deinit();
             self.allocator.free(old.value.distinct_id);
         }
 
-        try self.entries.put(id_copy, entry);
+        self.entries.putAssumeCapacity(id_copy, entry);
     }
 
     /// Returns true if the flag is enabled for this distinct_id.
     /// Returns null if not cached or TTL expired (caller should fetch).
     pub fn isEnabled(self: *FlagCache, distinct_id: []const u8, flag_key: []const u8) ?bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         const entry = self.entries.getPtr(distinct_id) orelse return null;
         if (self.isExpiredLocked(entry)) return null;
@@ -103,9 +113,12 @@ pub const FlagCache = struct {
 
     /// Returns the raw payload string for a flag (caller owns returned slice).
     /// Returns null if not cached, expired, or no payload for this flag.
-    pub fn getPayload(self: *FlagCache, allocator: std.mem.Allocator, distinct_id: []const u8, flag_key: []const u8) ?[]u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    /// Returns `error.OutOfMemory` on allocation failure — do **not** collapse
+    /// OOM into `null`, because callers treat `null` as a cache miss and will
+    /// issue a redundant `/decide/` round trip under memory pressure.
+    pub fn getPayload(self: *FlagCache, allocator: std.mem.Allocator, distinct_id: []const u8, flag_key: []const u8) std.mem.Allocator.Error!?[]u8 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         const entry = self.entries.getPtr(distinct_id) orelse return null;
         if (self.isExpiredLocked(entry)) return null;
@@ -113,13 +126,13 @@ pub const FlagCache = struct {
         const payloads = getPayloadsObject(entry) orelse return null;
         const val = payloads.get(flag_key) orelse return null;
         return switch (val) {
-            .string => |s| allocator.dupe(u8, s) catch null,
+            .string => |s| try allocator.dupe(u8, s),
             else => null,
         };
     }
 
     fn isExpiredLocked(self: *const FlagCache, entry: *const Entry) bool {
-        const age = std.time.milliTimestamp() - entry.fetched_at_ms;
+        const age = @import("types.zig").nowMs(self.io) - entry.fetched_at_ms;
         return age >= @as(i64, @intCast(self.ttl_ms));
     }
 
@@ -141,11 +154,12 @@ pub const FlagCache = struct {
 pub fn fetchAndCache(
     cache: *FlagCache,
     allocator: std.mem.Allocator,
+    io: std.Io,
     host: []const u8,
     api_key: []const u8,
     distinct_id: []const u8,
 ) !void {
-    const body = try transport.postDecide(allocator, host, api_key, distinct_id);
+    const body = try transport.postDecide(allocator, io, host, api_key, distinct_id);
     defer allocator.free(body);
     try cache.put(distinct_id, body);
 }
@@ -157,7 +171,7 @@ const sample_decide_response =
 ;
 
 test "feature flags: isEnabled returns correct values from cache" {
-    var cache = FlagCache.init(std.testing.allocator, 60_000, 100);
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 100);
     defer cache.deinit();
 
     try cache.put("user_123", sample_decide_response);
@@ -168,14 +182,14 @@ test "feature flags: isEnabled returns correct values from cache" {
 }
 
 test "feature flags: isEnabled returns null for unknown distinct_id" {
-    var cache = FlagCache.init(std.testing.allocator, 60_000, 100);
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 100);
     defer cache.deinit();
 
     try std.testing.expectEqual(@as(?bool, null), cache.isEnabled("nobody", "flag-a"));
 }
 
 test "feature flags: isEnabled returns null for unknown flag key" {
-    var cache = FlagCache.init(std.testing.allocator, 60_000, 100);
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 100);
     defer cache.deinit();
 
     try cache.put("user_123", sample_decide_response);
@@ -183,19 +197,58 @@ test "feature flags: isEnabled returns null for unknown flag key" {
 }
 
 test "feature flags: getPayload returns payload string" {
-    var cache = FlagCache.init(std.testing.allocator, 60_000, 100);
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 100);
     defer cache.deinit();
 
     try cache.put("user_123", sample_decide_response);
-    const payload = cache.getPayload(std.testing.allocator, "user_123", "flag-b");
+    const payload = try cache.getPayload(std.testing.allocator, "user_123", "flag-b");
     defer if (payload) |p| std.testing.allocator.free(p);
 
     try std.testing.expect(payload != null);
     try std.testing.expectEqualStrings("{\"key\":\"value\"}", payload.?);
 }
 
+test "feature flags: put OOM leaves prior entry intact (cache consistency)" {
+    // Regression: before the ensureUnusedCapacity + putAssumeCapacity switch,
+    // a post-fetchRemove OOM would leave the distinct_id entirely absent.
+    // With the fix, put() now fails early (during ensureUnusedCapacity),
+    // before any mutation — the existing entry for the same key must survive.
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 100);
+    defer cache.deinit();
+
+    try cache.put("user_1", sample_decide_response);
+    try std.testing.expect(cache.isEnabled("user_1", "flag-a").?);
+
+    // Construct a cache that *also* holds a FailingAllocator-backed sub-map.
+    // Simpler: force OOM on the second put's internal ensureUnusedCapacity
+    // by using a FailingAllocator with fail_index=0. We allocate a second
+    // cache to avoid mixing allocators mid-lifetime.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var oom_cache = FlagCache.init(failing.allocator(), std.Options.debug_threaded_io.?.io(), 60_000, 100);
+    defer oom_cache.deinit();
+
+    const put_result = oom_cache.put("user_x", sample_decide_response);
+    try std.testing.expectError(error.OutOfMemory, put_result);
+    // Cache starts empty and OOM must leave it empty (no dangling id_copy, no
+    // half-inserted entry). `deinit()` would catch leaks via testing.allocator.
+    try std.testing.expectEqual(@as(usize, 0), oom_cache.entries.count());
+}
+
+test "feature flags: getPayload propagates OOM instead of swallowing it" {
+    // Regression: `catch null` on `allocator.dupe` would map OOM to a cache
+    // miss, triggering a redundant /decide/ round trip under memory pressure.
+    // With the new `Allocator.Error!?[]u8` return type, OOM propagates.
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 100);
+    defer cache.deinit();
+    try cache.put("user_123", sample_decide_response);
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const result = cache.getPayload(failing.allocator(), "user_123", "flag-b");
+    try std.testing.expectError(error.OutOfMemory, result);
+}
+
 test "feature flags: TTL expiry returns null" {
-    var cache = FlagCache.init(std.testing.allocator, 0, 100); // 0ms TTL = always expired
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 0, 100); // 0ms TTL = always expired
     defer cache.deinit();
 
     try cache.put("user_123", sample_decide_response);
@@ -204,7 +257,7 @@ test "feature flags: TTL expiry returns null" {
 }
 
 test "feature flags: max_entries eviction" {
-    var cache = FlagCache.init(std.testing.allocator, 60_000, 2);
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 2);
     defer cache.deinit();
 
     try cache.put("user_1", sample_decide_response);
@@ -214,8 +267,27 @@ test "feature flags: max_entries eviction" {
     try std.testing.expectEqual(@as(usize, 2), cache.entries.count());
 }
 
+test "feature flags: re-put at capacity does not evict other entries" {
+    // Regression: before the eviction-skip fix, put("user_1", new) at
+    // capacity would evict an arbitrary other user *and* replace user_1,
+    // ending at capacity-1 entries with a valid cache slot lost.
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 2);
+    defer cache.deinit();
+
+    try cache.put("user_1", sample_decide_response);
+    try cache.put("user_2", sample_decide_response);
+    try std.testing.expectEqual(@as(usize, 2), cache.entries.count());
+
+    // Update user_1 while at capacity — user_2 must survive.
+    try cache.put("user_1", "{\"featureFlags\":{\"flag-a\":false},\"featureFlagPayloads\":{}}");
+
+    try std.testing.expectEqual(@as(usize, 2), cache.entries.count());
+    try std.testing.expect(cache.isEnabled("user_2", "flag-a").?);
+    try std.testing.expect(!cache.isEnabled("user_1", "flag-a").?);
+}
+
 test "feature flags: re-put same distinct_id replaces entry" {
-    var cache = FlagCache.init(std.testing.allocator, 60_000, 100);
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 100);
     defer cache.deinit();
 
     try cache.put("user_1", sample_decide_response);

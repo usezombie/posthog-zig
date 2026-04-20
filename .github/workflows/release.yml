@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - run: make lint
 
   test:
@@ -51,7 +51,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - run: make test-unit
 
   cross-compile:
@@ -68,7 +68,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - name: Build ${{ matrix.target }}
         run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
       - name: Verify no external C deps
@@ -96,7 +96,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - name: Run coverage gate
         run: make coverage
       - name: Upload to Codecov
@@ -150,7 +150,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - name: Create temp fetch workspace
         run: |
           FETCH_DIR="$(mktemp -d /tmp/posthog-fetch-XXXXXX)"

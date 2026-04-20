@@ -12,13 +12,14 @@ pub const TransportError = error{
 /// Returns the HTTP status code.
 pub fn postBatch(
     allocator: std.mem.Allocator,
+    io: std.Io,
     host: []const u8,
     api_key: []const u8,
     events: []const []const u8,
 ) TransportError!u16 {
     if (events.len == 0) return 200;
 
-    var payload_aw = std.io.Writer.Allocating.init(allocator);
+    var payload_aw = std.Io.Writer.Allocating.init(allocator);
     defer payload_aw.deinit();
     const pw = &payload_aw.writer;
 
@@ -34,18 +35,19 @@ pub fn postBatch(
     const url = std.fmt.allocPrint(allocator, "{s}/batch/", .{host}) catch return TransportError.OutOfMemory;
     defer allocator.free(url);
 
-    return doPost(allocator, url, payload_aw.written()) catch return TransportError.NetworkError;
+    return doPost(allocator, io, url, payload_aw.written()) catch return TransportError.NetworkError;
 }
 
 /// POST to PostHog /decide/?v=3 for feature flag evaluation.
 /// Returns the raw response body (caller owns the returned slice).
 pub fn postDecide(
     allocator: std.mem.Allocator,
+    io: std.Io,
     host: []const u8,
     api_key: []const u8,
     distinct_id: []const u8,
 ) ![]u8 {
-    var payload_aw = std.io.Writer.Allocating.init(allocator);
+    var payload_aw = std.Io.Writer.Allocating.init(allocator);
     defer payload_aw.deinit();
     const pw = &payload_aw.writer;
 
@@ -58,10 +60,10 @@ pub fn postDecide(
     const url = try std.fmt.allocPrint(allocator, "{s}/decide/?v=3", .{host});
     defer allocator.free(url);
 
-    var client = std.http.Client{ .allocator = allocator };
+    var client = std.http.Client{ .allocator = allocator, .io = io };
     defer client.deinit();
 
-    var response_aw = std.io.Writer.Allocating.init(allocator);
+    var response_aw = std.Io.Writer.Allocating.init(allocator);
     defer response_aw.deinit();
 
     const result = try client.fetch(.{
@@ -82,11 +84,11 @@ pub fn postDecide(
 
 // ── Internal ──────────────────────────────────────────────────────────────────
 
-fn doPost(allocator: std.mem.Allocator, url: []const u8, payload: []const u8) !u16 {
-    var client = std.http.Client{ .allocator = allocator };
+fn doPost(allocator: std.mem.Allocator, io: std.Io, url: []const u8, payload: []const u8) !u16 {
+    var client = std.http.Client{ .allocator = allocator, .io = io };
     defer client.deinit();
 
-    var response_aw = std.io.Writer.Allocating.init(allocator);
+    var response_aw = std.Io.Writer.Allocating.init(allocator);
     defer response_aw.deinit();
 
     const result = try client.fetch(.{
@@ -106,12 +108,11 @@ fn doPost(allocator: std.mem.Allocator, url: []const u8, payload: []const u8) !u
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 test "postDecide: builds correct JSON payload shape" {
-    // Verify the payload format postDecide would send to /decide/?v=3
     const allocator = std.testing.allocator;
     const api_key = "phc_testkey";
     const distinct_id = "user_123";
 
-    var payload_aw = std.io.Writer.Allocating.init(allocator);
+    var payload_aw = std.Io.Writer.Allocating.init(allocator);
     defer payload_aw.deinit();
     const pw = &payload_aw.writer;
 
@@ -130,7 +131,8 @@ test "postDecide: builds correct JSON payload shape" {
 }
 
 test "postBatch: empty events returns 200 without network call" {
-    const status = try postBatch(std.testing.allocator, "https://us.i.posthog.com", "phc_test", &.{});
+    const io = std.Options.debug_threaded_io.?.io();
+    const status = try postBatch(std.testing.allocator, io, "https://us.i.posthog.com", "phc_test", &.{});
     try std.testing.expectEqual(@as(u16, 200), status);
 }
 
@@ -141,7 +143,7 @@ test "postBatch: builds correct JSON payload shape" {
         "{\"event\":\"test\",\"properties\":{\"distinct_id\":\"u1\"}}",
     };
 
-    var payload_aw = std.io.Writer.Allocating.init(allocator);
+    var payload_aw = std.Io.Writer.Allocating.init(allocator);
     defer payload_aw.deinit();
     const pw = &payload_aw.writer;
 
