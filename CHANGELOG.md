@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Breaking
 
-- `posthog.init(...)` now takes an `io: std.Io` argument between `allocator` and `config`. Pass `posthog.defaultIo()` if you have no opinion, or your own `std.Io.Threaded` for concurrency policy. Zig 0.15.2 users: pin posthog-zig `0.1.x` — see [`docs/ZIG_0_15_COMPAT.md`](docs/ZIG_0_15_COMPAT.md).
+- `posthog.init(...)` now takes an `io: std.Io` argument between `allocator` and `config`. Pass `posthog.defaultIo()` if you have no opinion, or your own `std.Io.Threaded` for concurrency policy. Zig 0.15.2 users: pin posthog-zig `0.1.x` — see [`docs/v1/ZIG_0_15_COMPAT.md`](docs/v1/ZIG_0_15_COMPAT.md).
 - Minimum Zig version is now `0.16.0`. `0.15.x` is no longer supported on the `0.2.x` line.
 
 ### Changed
@@ -24,8 +24,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - `posthog.defaultIo()` convenience accessor returning the process-wide default `Io`.
-- `docs/ZIG_0_15_COMPAT.md` explaining how to pin `0.1.x` for Zig 0.15.2 users.
-- `docs/MIGRATION_ZIG_0_16.md` documenting every 0.15 -> 0.16 breakage this library hit.
+- `docs/v1/ZIG_0_15_COMPAT.md` explaining how to pin `0.1.x` for Zig 0.15.2 users.
+- `docs/v1/MIGRATION_ZIG_0_16.md` documenting every 0.15 -> 0.16 breakage this library hit.
 
 ### Verified
 

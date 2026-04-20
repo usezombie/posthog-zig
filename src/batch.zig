@@ -141,6 +141,11 @@ pub const Queue = struct {
             break :blk side.count >= self.flush_at;
         };
 
+        // Deliberately set the wake event **after** releasing the mutex
+        // (unlock runs in the `blk:` defer). Signalling under the lock would
+        // wake the flush thread only for it to immediately block on the same
+        // mutex we still hold; doing it here avoids that thundering-herd
+        // stall. Safe because Event.set has release semantics.
         if (need_wake) self.wake.set(self.io);
     }
 

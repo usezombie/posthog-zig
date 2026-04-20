@@ -9,7 +9,13 @@
         "build.zig.zon",
         "src",
         "tests",
-        "docs",
+        // Enumerate user-facing docs individually — shipping all of `docs/`
+        // would drag in `docs/v1/{pending,active,done}/` project-management
+        // specs and `docs/nostromo/` agent logs that are of no use to
+        // downstream consumers.
+        "docs/ARCHITECTURE.md",
+        "docs/v1/MIGRATION_ZIG_0_16.md",
+        "docs/v1/ZIG_0_15_COMPAT.md",
         "README.md",
         "CHANGELOG.md",
         "LICENSE",

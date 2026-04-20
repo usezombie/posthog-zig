@@ -94,6 +94,10 @@ pub const FlushThread = struct {
         // worse than clamping at u64::MAX and letting the @intCast below
         // police the i64 bound.
         const timeout_ns: i64 = @intCast(timeout_ms *| std.time.ns_per_ms);
+        // `now` is `i96` (from `Io.Timestamp.nanoseconds`), `timeout_ns` is
+        // `i64`. Zig 0.16 implicitly widens the smaller integer on mixed-type
+        // addition, so the sum is `i96`; the final `@intCast` brings it back
+        // to `i64` (safe: monotonic-boot ns fits in i64 for ~292 years).
         const deadline: i64 = @intCast(now + timeout_ns);
         self.ctx.shutdown_deadline_ns.store(deadline, .release);
         self.ctx.shutdown.store(true, .release);
@@ -112,7 +116,10 @@ fn shutdownDeadlinePassed(ctx: *ThreadCtx) bool {
 }
 
 fn flushLoop(ctx: *ThreadCtx) void {
-    const interval_ns = ctx.config.flush_interval_ms * std.time.ns_per_ms;
+    // Saturating mul matches `stop()`: an absurd `flush_interval_ms` saturates
+    // at u64::MAX instead of wrapping silently in ReleaseFast (which would
+    // make the timer appear to fire every iteration).
+    const interval_ns = ctx.config.flush_interval_ms *| std.time.ns_per_ms;
 
     while (!ctx.shutdown.load(.acquire)) {
         ctx.queue.waitForEventsOrTimeout(interval_ns);

@@ -208,6 +208,19 @@ test "feature flags: getPayload returns payload string" {
     try std.testing.expectEqualStrings("{\"key\":\"value\"}", payload.?);
 }
 
+test "feature flags: getPayload propagates OOM instead of swallowing it" {
+    // Regression: `catch null` on `allocator.dupe` would map OOM to a cache
+    // miss, triggering a redundant /decide/ round trip under memory pressure.
+    // With the new `Allocator.Error!?[]u8` return type, OOM propagates.
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 100);
+    defer cache.deinit();
+    try cache.put("user_123", sample_decide_response);
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const result = cache.getPayload(failing.allocator(), "user_123", "flag-b");
+    try std.testing.expectError(error.OutOfMemory, result);
+}
+
 test "feature flags: TTL expiry returns null" {
     var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 0, 100); // 0ms TTL = always expired
     defer cache.deinit();
