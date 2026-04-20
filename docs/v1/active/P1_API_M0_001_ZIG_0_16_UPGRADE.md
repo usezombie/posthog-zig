@@ -1,6 +1,6 @@
 # P1 · API · M0 · 001 — Upgrade posthog-zig to Zig 0.16
 
-- **Status:** PENDING
+- **Status:** IN_PROGRESS
 - **Priority:** P1
 - **Categories:** API
 - **Milestone:** M0
