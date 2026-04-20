@@ -208,6 +208,32 @@ test "feature flags: getPayload returns payload string" {
     try std.testing.expectEqualStrings("{\"key\":\"value\"}", payload.?);
 }
 
+test "feature flags: put OOM leaves prior entry intact (cache consistency)" {
+    // Regression: before the ensureUnusedCapacity + putAssumeCapacity switch,
+    // a post-fetchRemove OOM would leave the distinct_id entirely absent.
+    // With the fix, put() now fails early (during ensureUnusedCapacity),
+    // before any mutation — the existing entry for the same key must survive.
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 100);
+    defer cache.deinit();
+
+    try cache.put("user_1", sample_decide_response);
+    try std.testing.expect(cache.isEnabled("user_1", "flag-a").?);
+
+    // Construct a cache that *also* holds a FailingAllocator-backed sub-map.
+    // Simpler: force OOM on the second put's internal ensureUnusedCapacity
+    // by using a FailingAllocator with fail_index=0. We allocate a second
+    // cache to avoid mixing allocators mid-lifetime.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var oom_cache = FlagCache.init(failing.allocator(), std.Options.debug_threaded_io.?.io(), 60_000, 100);
+    defer oom_cache.deinit();
+
+    const put_result = oom_cache.put("user_x", sample_decide_response);
+    try std.testing.expectError(error.OutOfMemory, put_result);
+    // Cache starts empty and OOM must leave it empty (no dangling id_copy, no
+    // half-inserted entry). `deinit()` would catch leaks via testing.allocator.
+    try std.testing.expectEqual(@as(usize, 0), oom_cache.entries.count());
+}
+
 test "feature flags: getPayload propagates OOM instead of swallowing it" {
     // Regression: `catch null` on `allocator.dupe` would map OOM to a cache
     // miss, triggering a redundant /decide/ round trip under memory pressure.

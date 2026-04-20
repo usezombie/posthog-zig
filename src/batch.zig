@@ -290,6 +290,33 @@ test "queue: multiple drain cycles accumulate no memory" {
     try std.testing.expectEqual(@as(u64, 0), q.droppedCount());
 }
 
+test "queue: waitForEventsOrTimeout returns promptly when wake is pre-set" {
+    // Regression guard for the Io.Event replacement of Io.Condition.timedWait:
+    // set() before wait() must be observed (event is sticky until reset()).
+    var q = try Queue.init(std.testing.allocator, testIo(), 10, 5, false);
+    defer q.deinit();
+
+    q.signal(); // pre-set wake
+
+    const t0 = std.Io.Clock.awake.now(testIo()).nanoseconds;
+    q.waitForEventsOrTimeout(5 * std.time.ns_per_s); // 5s timeout, must return immediately
+    const elapsed_ns = std.Io.Clock.awake.now(testIo()).nanoseconds - t0;
+    try std.testing.expect(elapsed_ns < 500 * std.time.ns_per_ms);
+}
+
+test "queue: waitForEventsOrTimeout honours the timeout when no wake fires" {
+    var q = try Queue.init(std.testing.allocator, testIo(), 10, 5, false);
+    defer q.deinit();
+
+    const t0 = std.Io.Clock.awake.now(testIo()).nanoseconds;
+    q.waitForEventsOrTimeout(20 * std.time.ns_per_ms);
+    const elapsed_ns = std.Io.Clock.awake.now(testIo()).nanoseconds - t0;
+    // Must have waited at least ~15ms (lower bound is looser than upper) and
+    // must not have blocked for anywhere near test-timeout limits.
+    try std.testing.expect(elapsed_ns >= 15 * std.time.ns_per_ms);
+    try std.testing.expect(elapsed_ns < 1 * std.time.ns_per_s);
+}
+
 test "integration: concurrent producers enqueue without data race" {
     var q = try Queue.init(std.testing.allocator, testIo(), 1000, 500, false);
     defer q.deinit();

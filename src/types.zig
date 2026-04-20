@@ -160,6 +160,26 @@ pub fn formatIso8601(writer: anytype, epoch_ms: i64) !void {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+test "nowMs: returns a plausible post-2020 epoch-ms timestamp" {
+    // Jan 1 2020 00:00 UTC in epoch-ms. Anything below this means the clock
+    // facade is returning seconds or garbage — a regression worth catching.
+    const jan_2020_ms: i64 = 1_577_836_800_000;
+    const now = nowMs(std.Options.debug_threaded_io.?.io());
+    try std.testing.expect(now > jan_2020_ms);
+}
+
+test "monotonicNs: is monotonic and advances across calls" {
+    const io = std.Options.debug_threaded_io.?.io();
+    const t0 = monotonicNs(io);
+    // Busy-loop briefly so the clock has to advance on every platform.
+    var sink: u64 = 0;
+    var i: usize = 0;
+    while (i < 10_000) : (i += 1) sink +%= i;
+    std.mem.doNotOptimizeAway(sink);
+    const t1 = monotonicNs(io);
+    try std.testing.expect(t1 >= t0);
+}
+
 test "formatIso8601: epoch zero" {
     var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();

@@ -267,6 +267,67 @@ test "flush: stop() honours timeout_ms deadline in retry loop" {
     try std.testing.expectEqual(@as(usize, 1), FlushMock.dropped.load(.acquire));
 }
 
+test "flush: deadline crossed mid-retry stops further attempts" {
+    // Realistic shutdown path: attempt 0 runs and returns 503; before
+    // attempt 1 the deadline is moved into the past, so the loop must
+    // short-circuit to `.dropped` rather than issuing attempt 1.
+    var q = try batch.Queue.init(std.testing.allocator, testIo(), 8, 8, false);
+    defer q.deinit();
+
+    FlushMock.reset(&.{ 503, 200, 200 });
+    q.enqueue("{\"event\":\"x\",\"properties\":{\"distinct_id\":\"u\"},\"timestamp\":\"1970-01-01T00:00:00.000Z\"}");
+
+    const PostOnceThenDeadline = struct {
+        fn postBatch(
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            host: []const u8,
+            api_key: []const u8,
+            events: []const []const u8,
+        ) transport.TransportError!u16 {
+            const status = try FlushMock.postBatch(allocator, io, host, api_key, events);
+            // After attempt 0 returns, move the deadline into the past so
+            // the next iteration sees `shutdownDeadlinePassed == true`.
+            const ctx_deadline = &captured_ctx.?.shutdown_deadline_ns;
+            ctx_deadline.store(1, .release);
+            return status;
+        }
+
+        var captured_ctx: ?*ThreadCtx = null;
+    };
+
+    var ctx = ThreadCtx{
+        .shutdown = std.atomic.Value(bool).init(true),
+        .shutdown_deadline_ns = std.atomic.Value(i64).init(std.math.maxInt(i64)),
+        .queue = &q,
+        .allocator = std.testing.allocator,
+        .io = testIo(),
+        .config = .{
+            .host = "http://unused",
+            .api_key = "phc_test",
+            .enable_logging = false,
+            .flush_interval_ms = 60_000,
+            .max_retries = 5,
+            .on_deliver = FlushMock.onDeliver,
+            .post_batch_fn = PostOnceThenDeadline.postBatch,
+            .backoff_fn = FlushMock.backoff,
+            .sleep_fn = FlushMock.sleep,
+        },
+    };
+    PostOnceThenDeadline.captured_ctx = &ctx;
+    defer PostOnceThenDeadline.captured_ctx = null;
+
+    doFlush(&ctx);
+
+    // Exactly one POST (attempt 0 before deadline was moved).
+    try std.testing.expectEqual(@as(usize, 1), FlushMock.post_calls.load(.acquire));
+    // No deliveries, no failed-non-retry — the batch is `.dropped` via the
+    // deadline short-circuit.
+    try std.testing.expectEqual(@as(usize, 0), FlushMock.delivered.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), FlushMock.failed.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), FlushMock.dropped.load(.acquire));
+}
+
 test "integration: flush thread drains queue on shutdown" {
     var q = try batch.Queue.init(std.testing.allocator, testIo(), 100, 200, false);
     defer q.deinit();

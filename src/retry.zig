@@ -71,6 +71,41 @@ test "backoffNs: jitter varies across calls" {
     try std.testing.expect(distinct >= 2);
 }
 
+test "backoffNs: threadlocal PRNGs across threads do not return identical sequences" {
+    // Regression: the thread-local PRNG is seeded from
+    // `@intFromPtr(&rng_state) ^ counter*golden`. Two threads with different
+    // stack positions and different counter values must produce different
+    // first-10 jitter patterns.
+    const N = 4;
+    const PER_THREAD = 10;
+    const Worker = struct {
+        fn run(out: *[PER_THREAD]u64) void {
+            for (out, 0..) |*slot, i| {
+                _ = i;
+                slot.* = backoffNs(0, 1000, 30_000);
+            }
+        }
+    };
+    var results: [N][PER_THREAD]u64 = undefined;
+    var threads: [N]std.Thread = undefined;
+    for (&threads, 0..) |*t, i| {
+        t.* = try std.Thread.spawn(.{}, Worker.run, .{&results[i]});
+    }
+    for (&threads) |*t| t.join();
+
+    // At least two thread sequences must differ somewhere. Equal sequences
+    // across threads would mean all threads shared the same seed — the bug
+    // this PRNG design exists to prevent.
+    var any_diff = false;
+    for (1..N) |i| {
+        if (!std.mem.eql(u64, &results[0], &results[i])) {
+            any_diff = true;
+            break;
+        }
+    }
+    try std.testing.expect(any_diff);
+}
+
 test "shouldRetry: retries on 5xx" {
     try std.testing.expect(shouldRetry(500));
     try std.testing.expect(shouldRetry(503));
