@@ -3,12 +3,12 @@
 [![ci](https://github.com/usezombie/posthog-zig/actions/workflows/ci.yml/badge.svg)](https://github.com/usezombie/posthog-zig/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/usezombie/posthog-zig/branch/main/graph/badge.svg)](https://codecov.io/gh/usezombie/posthog-zig)
 [![version](https://img.shields.io/github/v/tag/usezombie/posthog-zig?label=version&sort=semver)](https://github.com/usezombie/posthog-zig/tags)
-[![zig](https://img.shields.io/badge/zig-0.15.x-orange)](https://ziglang.org)
+[![zig](https://img.shields.io/badge/zig-0.15.x%20%7C%200.16.x-orange)](https://ziglang.org)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 A server-side PostHog analytics client for Zig. Non-blocking event capture with background batch delivery, retry, and graceful shutdown.
 
-**Zig:** 0.15.x
+**Zig:** 0.15.x today · 0.16.x migration in progress — see [`docs/MIGRATION_ZIG_0_16.md`](docs/MIGRATION_ZIG_0_16.md)
 **PostHog API:** `/batch/` (capture) + `/decide/` v3 (feature flags)
 
 ---
