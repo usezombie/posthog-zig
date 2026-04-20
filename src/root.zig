@@ -53,8 +53,15 @@ pub const version = types.version;
 /// Initialize a PostHog client. Spawns the background flush thread.
 /// Returns a heap-allocated client. Call `defer client.deinit()` to flush
 /// remaining events, stop the thread, and free all resources.
-pub fn init(allocator: std.mem.Allocator, config: Config) !*PostHogClient {
-    return PostHogClient.init(allocator, config);
+pub fn init(allocator: std.mem.Allocator, io: std.Io, config: Config) !*PostHogClient {
+    return PostHogClient.init(allocator, io, config);
+}
+
+/// Convenience accessor for the process-wide default `Io`, populated by
+/// `start.zig` with the real environment and a thread-capable backend. This
+/// is the value to pass as `io` when the caller has no stronger opinion.
+pub fn defaultIo() std.Io {
+    return std.Options.debug_threaded_io.?.io();
 }
 
 // ── Pull in all test blocks ───────────────────────────────────────────────────

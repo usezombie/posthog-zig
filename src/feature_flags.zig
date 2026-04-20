@@ -10,8 +10,9 @@ const log = std.log.scoped(.posthog);
 
 pub const FlagCache = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     entries: std.StringHashMap(Entry),
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
     ttl_ms: u64,
     max_entries: usize,
 
@@ -22,19 +23,20 @@ pub const FlagCache = struct {
         distinct_id: []u8, // allocator-owned copy (used as map key)
     };
 
-    pub fn init(allocator: std.mem.Allocator, ttl_ms: u64, max_entries: usize) FlagCache {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, ttl_ms: u64, max_entries: usize) FlagCache {
         return .{
             .allocator = allocator,
+            .io = io,
             .entries = std.StringHashMap(Entry).init(allocator),
-            .mutex = .{},
+            .mutex = .init,
             .ttl_ms = ttl_ms,
             .max_entries = max_entries,
         };
     }
 
     pub fn deinit(self: *FlagCache) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         var it = self.entries.iterator();
         while (it.next()) |kv| {
             kv.value_ptr.parsed.deinit();
@@ -53,12 +55,12 @@ pub const FlagCache = struct {
 
         const entry = Entry{
             .parsed = parsed,
-            .fetched_at_ms = std.time.milliTimestamp(),
+            .fetched_at_ms = @import("types.zig").nowMs(self.io),
             .distinct_id = id_copy,
         };
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         // Evict one entry if at capacity.
         // Copy key and entry before remove — remove uses the key to find the slot,
@@ -86,8 +88,8 @@ pub const FlagCache = struct {
     /// Returns true if the flag is enabled for this distinct_id.
     /// Returns null if not cached or TTL expired (caller should fetch).
     pub fn isEnabled(self: *FlagCache, distinct_id: []const u8, flag_key: []const u8) ?bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         const entry = self.entries.getPtr(distinct_id) orelse return null;
         if (self.isExpiredLocked(entry)) return null;
@@ -104,8 +106,8 @@ pub const FlagCache = struct {
     /// Returns the raw payload string for a flag (caller owns returned slice).
     /// Returns null if not cached, expired, or no payload for this flag.
     pub fn getPayload(self: *FlagCache, allocator: std.mem.Allocator, distinct_id: []const u8, flag_key: []const u8) ?[]u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         const entry = self.entries.getPtr(distinct_id) orelse return null;
         if (self.isExpiredLocked(entry)) return null;
@@ -119,7 +121,7 @@ pub const FlagCache = struct {
     }
 
     fn isExpiredLocked(self: *const FlagCache, entry: *const Entry) bool {
-        const age = std.time.milliTimestamp() - entry.fetched_at_ms;
+        const age = @import("types.zig").nowMs(self.io) - entry.fetched_at_ms;
         return age >= @as(i64, @intCast(self.ttl_ms));
     }
 
@@ -141,11 +143,12 @@ pub const FlagCache = struct {
 pub fn fetchAndCache(
     cache: *FlagCache,
     allocator: std.mem.Allocator,
+    io: std.Io,
     host: []const u8,
     api_key: []const u8,
     distinct_id: []const u8,
 ) !void {
-    const body = try transport.postDecide(allocator, host, api_key, distinct_id);
+    const body = try transport.postDecide(allocator, io, host, api_key, distinct_id);
     defer allocator.free(body);
     try cache.put(distinct_id, body);
 }
@@ -157,7 +160,7 @@ const sample_decide_response =
 ;
 
 test "feature flags: isEnabled returns correct values from cache" {
-    var cache = FlagCache.init(std.testing.allocator, 60_000, 100);
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 100);
     defer cache.deinit();
 
     try cache.put("user_123", sample_decide_response);
@@ -168,14 +171,14 @@ test "feature flags: isEnabled returns correct values from cache" {
 }
 
 test "feature flags: isEnabled returns null for unknown distinct_id" {
-    var cache = FlagCache.init(std.testing.allocator, 60_000, 100);
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 100);
     defer cache.deinit();
 
     try std.testing.expectEqual(@as(?bool, null), cache.isEnabled("nobody", "flag-a"));
 }
 
 test "feature flags: isEnabled returns null for unknown flag key" {
-    var cache = FlagCache.init(std.testing.allocator, 60_000, 100);
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 100);
     defer cache.deinit();
 
     try cache.put("user_123", sample_decide_response);
@@ -183,7 +186,7 @@ test "feature flags: isEnabled returns null for unknown flag key" {
 }
 
 test "feature flags: getPayload returns payload string" {
-    var cache = FlagCache.init(std.testing.allocator, 60_000, 100);
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 100);
     defer cache.deinit();
 
     try cache.put("user_123", sample_decide_response);
@@ -195,7 +198,7 @@ test "feature flags: getPayload returns payload string" {
 }
 
 test "feature flags: TTL expiry returns null" {
-    var cache = FlagCache.init(std.testing.allocator, 0, 100); // 0ms TTL = always expired
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 0, 100); // 0ms TTL = always expired
     defer cache.deinit();
 
     try cache.put("user_123", sample_decide_response);
@@ -204,7 +207,7 @@ test "feature flags: TTL expiry returns null" {
 }
 
 test "feature flags: max_entries eviction" {
-    var cache = FlagCache.init(std.testing.allocator, 60_000, 2);
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 2);
     defer cache.deinit();
 
     try cache.put("user_1", sample_decide_response);
@@ -215,7 +218,7 @@ test "feature flags: max_entries eviction" {
 }
 
 test "feature flags: re-put same distinct_id replaces entry" {
-    var cache = FlagCache.init(std.testing.allocator, 60_000, 100);
+    var cache = FlagCache.init(std.testing.allocator, std.Options.debug_threaded_io.?.io(), 60_000, 100);
     defer cache.deinit();
 
     try cache.put("user_1", sample_decide_response);

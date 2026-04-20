@@ -2,8 +2,20 @@
 
 const std = @import("std");
 
-pub const version = "0.1.0";
+pub const version = "0.2.0";
 pub const lib_name = "posthog-zig";
+
+/// Epoch-milliseconds timestamp (post-0.15: std.time.milliTimestamp is gone).
+pub fn nowMs(io: std.Io) i64 {
+    const ts = std.Io.Clock.real.now(io);
+    return @intCast(@divTrunc(ts.nanoseconds, std.time.ns_per_ms));
+}
+
+/// Monotonic-clock nanoseconds (post-0.15: std.time.nanoTimestamp is gone).
+pub fn monotonicNs(io: std.Io) i64 {
+    const ts = std.Io.Clock.awake.now(io);
+    return @intCast(ts.nanoseconds);
+}
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -149,21 +161,21 @@ pub fn formatIso8601(writer: anytype, epoch_ms: i64) !void {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 test "formatIso8601: epoch zero" {
-    var aw = std.io.Writer.Allocating.init(std.testing.allocator);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
     try formatIso8601(&aw.writer, 0);
     try std.testing.expectEqualStrings("1970-01-01T00:00:00.000Z", aw.written());
 }
 
 test "formatIso8601: one day" {
-    var aw = std.io.Writer.Allocating.init(std.testing.allocator);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
     try formatIso8601(&aw.writer, 86_400_000);
     try std.testing.expectEqualStrings("1970-01-02T00:00:00.000Z", aw.written());
 }
 
 test "formatIso8601: milliseconds preserved" {
-    var aw = std.io.Writer.Allocating.init(std.testing.allocator);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
     try formatIso8601(&aw.writer, 1_500);
     try std.testing.expectEqualStrings("1970-01-01T00:00:01.500Z", aw.written());
@@ -177,28 +189,28 @@ test "ExceptionLevel.string" {
 }
 
 test "writeJsonStr: plain string" {
-    var aw = std.io.Writer.Allocating.init(std.testing.allocator);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
     try writeJsonStr(&aw.writer, "hello");
     try std.testing.expectEqualStrings("\"hello\"", aw.written());
 }
 
 test "writeJsonStr: special chars escaped" {
-    var aw = std.io.Writer.Allocating.init(std.testing.allocator);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
     try writeJsonStr(&aw.writer, "say \"hi\"");
     try std.testing.expectEqualStrings("\"say \\\"hi\\\"\"", aw.written());
 }
 
 test "writePropertyValue: integer negative" {
-    var aw = std.io.Writer.Allocating.init(std.testing.allocator);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
     try writePropertyValue(&aw.writer, .{ .integer = -42 });
     try std.testing.expectEqualStrings("-42", aw.written());
 }
 
 test "writeJsonStr: control chars encoded as \\uXXXX" {
-    var aw = std.io.Writer.Allocating.init(std.testing.allocator);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
     try writeJsonStr(&aw.writer, "\x00");
     try std.testing.expectEqualStrings("\"\\u0000\"", aw.written());
@@ -211,7 +223,7 @@ test "writeJsonStr: control chars encoded as \\uXXXX" {
 }
 
 test "writePropertyValue: boolean" {
-    var aw = std.io.Writer.Allocating.init(std.testing.allocator);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
     try writePropertyValue(&aw.writer, .{ .boolean = true });
     try std.testing.expectEqualStrings("true", aw.written());

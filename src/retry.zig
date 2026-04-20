@@ -2,12 +2,27 @@
 
 const std = @import("std");
 
+/// Thread-local PRNG seeded lazily from nanoTimestamp.
+/// Zig 0.16 removed `std.crypto.random`; retry jitter is non-cryptographic
+/// so a seeded `DefaultPrng` is sufficient and cheap.
+threadlocal var rng_state: ?std.Random.DefaultPrng = null;
+
+fn threadRandom() std.Random {
+    if (rng_state == null) {
+        const io = std.Options.debug_threaded_io.?.io();
+        const ts = std.Io.Clock.awake.now(io);
+        const seed: u64 = @bitCast(@as(i64, @truncate(ts.nanoseconds)));
+        rng_state = std.Random.DefaultPrng.init(seed);
+    }
+    return rng_state.?.random();
+}
+
 /// Returns backoff delay in nanoseconds for the given attempt (0-indexed).
 /// Formula: min(base_ms * 2^attempt, max_ms) + random jitter [0, 500ms).
 pub fn backoffNs(attempt: u32, base_ms: u64, max_ms: u64) u64 {
     const exp: u64 = if (attempt < 63) @as(u64, 1) << @intCast(attempt) else std.math.maxInt(u64);
     const delay_ms = @min(base_ms *| exp, max_ms); // saturating mul
-    const jitter_ms = std.crypto.random.intRangeLessThan(u64, 0, 500);
+    const jitter_ms = threadRandom().intRangeLessThan(u64, 0, 500);
     return (delay_ms + jitter_ms) * std.time.ns_per_ms;
 }
 
@@ -24,17 +39,28 @@ test "backoffNs: first attempt is at least base_ms" {
 }
 
 test "backoffNs: capped at max_ms + jitter ceiling" {
-    // Max delay = max_ms + 499ms jitter
     const ns = backoffNs(30, 1000, 30_000);
     const max_possible_ns = (30_000 + 500) * std.time.ns_per_ms;
     try std.testing.expect(ns <= max_possible_ns);
 }
 
 test "backoffNs: does not overflow with large attempt" {
-    // Should not panic
     const ns = backoffNs(100, 1000, 30_000);
     const max_possible_ns = (30_000 + 500) * std.time.ns_per_ms;
     try std.testing.expect(ns <= max_possible_ns);
+}
+
+test "backoffNs: jitter varies across calls" {
+    // 10 calls, at least 2 distinct values (monotonically jittered).
+    var seen: [10]u64 = undefined;
+    for (&seen) |*s| s.* = backoffNs(0, 1000, 30_000);
+    var distinct: usize = 0;
+    for (seen, 0..) |v, i| {
+        var dup = false;
+        for (seen[0..i]) |w| if (w == v) { dup = true; break; };
+        if (!dup) distinct += 1;
+    }
+    try std.testing.expect(distinct >= 2);
 }
 
 test "shouldRetry: retries on 5xx" {

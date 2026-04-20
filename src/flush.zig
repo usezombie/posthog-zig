@@ -17,6 +17,7 @@ const log = std.log.scoped(.posthog);
 
 const PostBatchFn = *const fn (
     allocator: std.mem.Allocator,
+    io: std.Io,
     host: []const u8,
     api_key: []const u8,
     events: []const []const u8,
@@ -43,6 +44,7 @@ const ThreadCtx = struct {
     shutdown: std.atomic.Value(bool),
     queue: *batch.Queue,
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: FlushConfig,
 };
 
@@ -52,6 +54,7 @@ pub const FlushThread = struct {
 
     pub fn spawn(
         allocator: std.mem.Allocator,
+        io: std.Io,
         queue: *batch.Queue,
         config: FlushConfig,
     ) !FlushThread {
@@ -61,6 +64,7 @@ pub const FlushThread = struct {
             .shutdown = std.atomic.Value(bool).init(false),
             .queue = queue,
             .allocator = allocator,
+            .io = io,
             .config = config,
         };
 
@@ -69,8 +73,6 @@ pub const FlushThread = struct {
     }
 
     /// Signal shutdown, drain remaining events, and join the thread.
-    /// In v0.1, join is unbounded — the thread always runs to completion.
-    /// timeout_ms is accepted for API stability but not enforced until v0.2.
     pub fn stop(self: *FlushThread, timeout_ms: u64) void {
         _ = timeout_ms; // v0.2: implement timed join using timeout_ms
         self.ctx.shutdown.store(true, .release);
@@ -94,10 +96,8 @@ fn flushLoop(ctx: *ThreadCtx) void {
 }
 
 fn doFlush(ctx: *ThreadCtx) void {
-    // Swap write↔flush sides atomically. Flush thread owns the returned side
-    // exclusively — no lock contention during HTTP delivery.
     const result = ctx.queue.drain();
-    defer ctx.queue.resetSide(result.side_idx); // one arena reset after delivery
+    defer ctx.queue.resetSide(result.side_idx);
 
     const events = result.events;
     if (events.len == 0) return;
@@ -128,7 +128,6 @@ fn doFlush(ctx: *ThreadCtx) void {
             continue;
         }
 
-        // 4xx (not 429): bad data, don't retry
         if (ctx.config.enable_logging) log.warn("[posthog] batch rejected ({d}): dropping {d} events", .{ status, events.len });
         if (ctx.config.on_deliver) |cb| cb(.failed, events.len);
         return;
@@ -139,8 +138,8 @@ fn doFlush(ctx: *ThreadCtx) void {
 }
 
 fn postBatch(ctx: *ThreadCtx, events: []const []const u8) transport.TransportError!u16 {
-    if (ctx.config.post_batch_fn) |f| return f(ctx.allocator, ctx.config.host, ctx.config.api_key, events);
-    return transport.postBatch(ctx.allocator, ctx.config.host, ctx.config.api_key, events);
+    if (ctx.config.post_batch_fn) |f| return f(ctx.allocator, ctx.io, ctx.config.host, ctx.config.api_key, events);
+    return transport.postBatch(ctx.allocator, ctx.io, ctx.config.host, ctx.config.api_key, events);
 }
 
 fn backoffDelayNs(ctx: *ThreadCtx, attempt: u32, base_ms: u64, max_ms: u64) u64 {
@@ -153,13 +152,17 @@ fn sleepForNs(ctx: *ThreadCtx, ns: u64) void {
         f(ns);
         return;
     }
-    std.Thread.sleep(ns);
+    ctx.io.sleep(std.Io.Duration.fromNanoseconds(@intCast(ns)), .awake) catch {};
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+fn testIo() std.Io {
+    return std.Options.debug_threaded_io.?.io();
+}
+
 test "integration: flush thread starts, processes queue, and stops cleanly" {
-    var q = try batch.Queue.init(std.testing.allocator, 100, 50, false);
+    var q = try batch.Queue.init(std.testing.allocator, testIo(), 100, 50, false);
     defer q.deinit();
 
     const cfg = FlushConfig{
@@ -171,18 +174,15 @@ test "integration: flush thread starts, processes queue, and stops cleanly" {
         .on_deliver = null,
     };
 
-    // Enqueue a few events — they will fail delivery (no real key) but thread must not crash
     q.enqueue("{\"event\":\"test\",\"properties\":{\"distinct_id\":\"u1\"},\"timestamp\":\"1970-01-01T00:00:00.000Z\"}");
 
-    var ft = try FlushThread.spawn(std.testing.allocator, &q, cfg);
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    var ft = try FlushThread.spawn(std.testing.allocator, testIo(), &q, cfg);
+    testIo().sleep(std.Io.Duration.fromMilliseconds(50), .awake) catch {};
     ft.stop(1000);
-
-    // Thread must have fully joined — no dangling state
 }
 
 test "integration: flush thread drains queue on shutdown" {
-    var q = try batch.Queue.init(std.testing.allocator, 100, 200, false); // flush_at=200 so timer won't auto-flush
+    var q = try batch.Queue.init(std.testing.allocator, testIo(), 100, 200, false);
     defer q.deinit();
 
     for (0..5) |_| {
@@ -193,15 +193,14 @@ test "integration: flush thread drains queue on shutdown" {
         .host = "https://us.i.posthog.com",
         .api_key = "phc_test_noop",
         .enable_logging = false,
-        .flush_interval_ms = 60_000, // very long so only shutdown triggers flush
+        .flush_interval_ms = 60_000,
         .max_retries = 0,
         .on_deliver = null,
     };
 
-    var ft = try FlushThread.spawn(std.testing.allocator, &q, cfg);
+    var ft = try FlushThread.spawn(std.testing.allocator, testIo(), &q, cfg);
     ft.stop(2000);
 
-    // After stop(), queue should be drained (events were attempted, either delivered or dropped)
     try std.testing.expectEqual(@as(usize, 0), q.pendingCount());
 }
 
@@ -232,11 +231,13 @@ const FlushMock = struct {
 
     fn postBatch(
         allocator: std.mem.Allocator,
+        io: std.Io,
         host: []const u8,
         api_key: []const u8,
         events: []const []const u8,
     ) transport.TransportError!u16 {
         _ = allocator;
+        _ = io;
         _ = host;
         _ = api_key;
         _ = events;
@@ -271,7 +272,7 @@ const FlushMock = struct {
 };
 
 fn runSingleFlushWithMock(max_retries: u32, seq: []const u16) !void {
-    var q = try batch.Queue.init(std.testing.allocator, 8, 8, false);
+    var q = try batch.Queue.init(std.testing.allocator, testIo(), 8, 8, false);
     defer q.deinit();
 
     FlushMock.reset(seq);
@@ -281,6 +282,7 @@ fn runSingleFlushWithMock(max_retries: u32, seq: []const u16) !void {
         .shutdown = std.atomic.Value(bool).init(false),
         .queue = &q,
         .allocator = std.testing.allocator,
+        .io = testIo(),
         .config = .{
             .host = "http://unused",
             .api_key = "phc_test",

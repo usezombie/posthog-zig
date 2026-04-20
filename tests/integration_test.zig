@@ -5,10 +5,13 @@ const std = @import("std");
 const posthog = @import("posthog");
 
 fn getApiKey(allocator: std.mem.Allocator) ![]const u8 {
-    return std.process.getEnvVarOwned(allocator, "POSTHOG_API_KEY") catch {
+    // Zig 0.16 removed `std.process.getEnvVarOwned`.
+    const env = std.Options.debug_threaded_io.?.environ.process_environ;
+    const val = env.getPosix("POSTHOG_API_KEY") orelse {
         std.debug.print("SKIP: POSTHOG_API_KEY not set\n", .{});
         return error.SkipZigTest;
     };
+    return try allocator.dupe(u8, val);
 }
 
 test "integration: capture event reaches PostHog /batch/" {
@@ -16,7 +19,7 @@ test "integration: capture event reaches PostHog /batch/" {
     const api_key = try getApiKey(allocator);
     defer allocator.free(api_key);
 
-    var client = try posthog.init(allocator, .{
+    var client = try posthog.init(allocator, posthog.defaultIo(), .{
         .api_key = api_key,
         .flush_interval_ms = 60_000,
         .max_retries = 1,
@@ -33,7 +36,6 @@ test "integration: capture event reaches PostHog /batch/" {
         },
     });
 
-    // Flush synchronously so the test can verify delivery
     try client.flush();
 }
 
@@ -42,7 +44,7 @@ test "integration: identify reaches PostHog" {
     const api_key = try getApiKey(allocator);
     defer allocator.free(api_key);
 
-    var client = try posthog.init(allocator, .{
+    var client = try posthog.init(allocator, posthog.defaultIo(), .{
         .api_key = api_key,
         .flush_interval_ms = 60_000,
         .max_retries = 1,
@@ -65,7 +67,7 @@ test "integration: captureException reaches PostHog Error Tracking" {
     const api_key = try getApiKey(allocator);
     defer allocator.free(api_key);
 
-    var client = try posthog.init(allocator, .{
+    var client = try posthog.init(allocator, posthog.defaultIo(), .{
         .api_key = api_key,
         .flush_interval_ms = 60_000,
         .max_retries = 1,
@@ -92,7 +94,7 @@ test "integration: group reaches PostHog" {
     const api_key = try getApiKey(allocator);
     defer allocator.free(api_key);
 
-    var client = try posthog.init(allocator, .{
+    var client = try posthog.init(allocator, posthog.defaultIo(), .{
         .api_key = api_key,
         .flush_interval_ms = 60_000,
         .max_retries = 1,
@@ -117,20 +119,7 @@ test "integration: on_deliver callback fires on successful delivery" {
     const api_key = try getApiKey(allocator);
     defer allocator.free(api_key);
 
-    const Ctx = struct {
-        delivered: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
-
-        fn onDeliver(status: posthog.DeliveryStatus, count: usize) void {
-            _ = count;
-            if (status == .delivered) {
-                // Can't easily access self here from a fn pointer, use a global for test
-                delivered_count.fetchAdd(1, .acq_rel);
-            }
-        }
-    };
-    _ = Ctx;
-
-    var client = try posthog.init(allocator, .{
+    var client = try posthog.init(allocator, posthog.defaultIo(), .{
         .api_key = api_key,
         .flush_interval_ms = 60_000,
         .max_retries = 1,
@@ -151,8 +140,7 @@ test "integration: on_deliver callback fires on successful delivery" {
     });
 
     try client.flush();
-    // Allow background thread to process callback
-    std.Thread.sleep(100 * std.time.ns_per_ms);
+    posthog.defaultIo().sleep(std.Io.Duration.fromMilliseconds(100), .awake) catch {};
 
     try std.testing.expect(delivered_count.load(.acquire) > 0);
 }

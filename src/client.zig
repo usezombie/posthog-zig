@@ -15,6 +15,7 @@ const log = std.log.scoped(.posthog);
 
 pub const PostHogClient = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: types.Config,
     queue: batch.Queue,
     flush_thread: flusher.FlushThread,
@@ -24,20 +25,24 @@ pub const PostHogClient = struct {
     /// Returns a heap-allocated client so &self.queue is a stable address
     /// for the flush thread — no stale pointer on return.
     /// Call `client.deinit()` to flush remaining events and free all resources.
-    pub fn init(allocator: std.mem.Allocator, config: types.Config) !*PostHogClient {
+    ///
+    /// `io` is threaded through concurrency primitives (Io.Mutex, Io.Event) and
+    /// the HTTP client. Use `std.Options.debug_threaded_io.?.io()` for the
+    /// default process-wide Io, or pass your own `std.Io.Threaded`.
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, config: types.Config) !*PostHogClient {
         const self = try allocator.create(PostHogClient);
         errdefer allocator.destroy(self);
 
         self.allocator = allocator;
+        self.io = io;
         self.config = config;
 
-        self.queue = try batch.Queue.init(allocator, config.max_queue_size, config.flush_at, config.enable_logging);
+        self.queue = try batch.Queue.init(allocator, io, config.max_queue_size, config.flush_at, config.enable_logging);
         errdefer self.queue.deinit();
 
-        self.flag_cache = feature_flags.FlagCache.init(allocator, config.feature_flag_ttl_ms, 1000);
+        self.flag_cache = feature_flags.FlagCache.init(allocator, io, config.feature_flag_ttl_ms, 1000);
 
-        // &self.queue is stable — self is heap-allocated, address never changes.
-        self.flush_thread = try flusher.FlushThread.spawn(allocator, &self.queue, .{
+        self.flush_thread = try flusher.FlushThread.spawn(allocator, io, &self.queue, .{
             .host = config.host,
             .api_key = config.api_key,
             .enable_logging = config.enable_logging,
@@ -49,8 +54,6 @@ pub const PostHogClient = struct {
         return self;
     }
 
-    /// Flush remaining events, stop the flush thread, free all resources.
-    /// Also frees the PostHogClient struct itself.
     pub fn deinit(self: *PostHogClient) void {
         self.flush_thread.stop(self.config.shutdown_flush_timeout_ms);
         self.queue.deinit();
@@ -60,34 +63,29 @@ pub const PostHogClient = struct {
 
     // ── Non-blocking capture methods ─────────────────────────────────────────
 
-    /// Capture an arbitrary event. Non-blocking.
     pub fn capture(self: *PostHogClient, opts: types.CaptureOptions) !void {
-        const ts = opts.timestamp orelse std.time.milliTimestamp();
+        const ts = opts.timestamp orelse types.nowMs(self.io);
         const json = try serializeEvent(self.allocator, opts.event, opts.distinct_id, opts.properties, ts);
         defer self.allocator.free(json);
         self.queue.enqueue(json);
     }
 
-    /// Identify a user with traits. Non-blocking.
     pub fn identify(self: *PostHogClient, opts: types.IdentifyOptions) !void {
-        const ts = opts.timestamp orelse std.time.milliTimestamp();
+        const ts = opts.timestamp orelse types.nowMs(self.io);
         const json = try serializeIdentify(self.allocator, opts.distinct_id, opts.properties, ts);
         defer self.allocator.free(json);
         self.queue.enqueue(json);
     }
 
-    /// Associate a user with a group (workspace, org, etc.). Non-blocking.
     pub fn group(self: *PostHogClient, opts: types.GroupOptions) !void {
-        const ts = opts.timestamp orelse std.time.milliTimestamp();
+        const ts = opts.timestamp orelse types.nowMs(self.io);
         const json = try serializeGroup(self.allocator, opts, ts);
         defer self.allocator.free(json);
         self.queue.enqueue(json);
     }
 
-    /// Capture an exception for PostHog Error Tracking. Non-blocking.
-    /// Emits a `$exception` event compatible with the PostHog Error Tracking UI.
     pub fn captureException(self: *PostHogClient, opts: types.ExceptionOptions) !void {
-        const ts = opts.timestamp orelse std.time.milliTimestamp();
+        const ts = opts.timestamp orelse types.nowMs(self.io);
         const json = try serializeException(self.allocator, opts, ts);
         defer self.allocator.free(json);
         self.queue.enqueue(json);
@@ -95,19 +93,15 @@ pub const PostHogClient = struct {
 
     // ── Feature flags ─────────────────────────────────────────────────────────
 
-    /// Check if a feature flag is enabled for a distinct_id.
-    /// First call fetches from PostHog (sync); subsequent calls use the TTL cache.
     pub fn isFeatureEnabled(self: *PostHogClient, flag_key: []const u8, distinct_id: []const u8) !bool {
         if (self.flag_cache.isEnabled(distinct_id, flag_key)) |enabled| return enabled;
-        try feature_flags.fetchAndCache(&self.flag_cache, self.allocator, self.config.host, self.config.api_key, distinct_id);
+        try feature_flags.fetchAndCache(&self.flag_cache, self.allocator, self.io, self.config.host, self.config.api_key, distinct_id);
         return self.flag_cache.isEnabled(distinct_id, flag_key) orelse false;
     }
 
-    /// Get the JSON payload for a feature flag. Returns null if no payload.
-    /// Caller owns the returned slice.
     pub fn getFeatureFlagPayload(self: *PostHogClient, flag_key: []const u8, distinct_id: []const u8) !?[]u8 {
         if (self.flag_cache.getPayload(self.allocator, distinct_id, flag_key)) |p| return p;
-        try feature_flags.fetchAndCache(&self.flag_cache, self.allocator, self.config.host, self.config.api_key, distinct_id);
+        try feature_flags.fetchAndCache(&self.flag_cache, self.allocator, self.io, self.config.host, self.config.api_key, distinct_id);
         return self.flag_cache.getPayload(self.allocator, distinct_id, flag_key);
     }
 
@@ -116,7 +110,7 @@ pub const PostHogClient = struct {
         const result = self.queue.drain();
         defer self.queue.resetSide(result.side_idx);
         if (result.events.len == 0) return;
-        _ = try transport.postBatch(self.allocator, self.config.host, self.config.api_key, result.events);
+        _ = try transport.postBatch(self.allocator, self.io, self.config.host, self.config.api_key, result.events);
     }
 };
 
@@ -129,7 +123,7 @@ fn serializeEvent(
     properties: ?[]const types.Property,
     timestamp_ms: i64,
 ) ![]u8 {
-    var aw = std.io.Writer.Allocating.init(allocator);
+    var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
     const w = &aw.writer;
 
@@ -161,7 +155,7 @@ fn serializeIdentify(
     properties: ?[]const types.Property,
     timestamp_ms: i64,
 ) ![]u8 {
-    var aw = std.io.Writer.Allocating.init(allocator);
+    var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
     const w = &aw.writer;
 
@@ -191,7 +185,7 @@ fn serializeGroup(
     opts: types.GroupOptions,
     timestamp_ms: i64,
 ) ![]u8 {
-    var aw = std.io.Writer.Allocating.init(allocator);
+    var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
     const w = &aw.writer;
 
@@ -225,7 +219,7 @@ fn serializeException(
     opts: types.ExceptionOptions,
     timestamp_ms: i64,
 ) ![]u8 {
-    var aw = std.io.Writer.Allocating.init(allocator);
+    var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
     const w = &aw.writer;
 
@@ -261,6 +255,10 @@ fn serializeException(
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+fn testIo() std.Io {
+    return std.Options.debug_threaded_io.?.io();
+}
 
 test "serializeEvent: produces valid JSON with required fields" {
     const allocator = std.testing.allocator;
@@ -366,7 +364,7 @@ test "serializeException: stack_trace included when set" {
 }
 
 test "flush: empty queue is a no-op (no network call)" {
-    const c = try PostHogClient.init(std.testing.allocator, .{
+    const c = try PostHogClient.init(std.testing.allocator, testIo(), .{
         .api_key = "phc_test",
         .enable_logging = false,
         .flush_interval_ms = 60_000,
@@ -374,13 +372,12 @@ test "flush: empty queue is a no-op (no network call)" {
         .max_retries = 0,
     });
     defer c.deinit();
-    // No events — flush() returns immediately without touching the network.
     try c.flush();
     try std.testing.expectEqual(@as(usize, 0), c.queue.pendingCount());
 }
 
 test "flush: drains pending events (queue empties regardless of network outcome)" {
-    const c = try PostHogClient.init(std.testing.allocator, .{
+    const c = try PostHogClient.init(std.testing.allocator, testIo(), .{
         .api_key = "phc_test",
         .enable_logging = false,
         .flush_interval_ms = 60_000,
@@ -392,15 +389,12 @@ test "flush: drains pending events (queue empties regardless of network outcome)
     try c.capture(.{ .distinct_id = "u1", .event = "x", .timestamp = 0 });
     try std.testing.expectEqual(@as(usize, 1), c.queue.pendingCount());
 
-    // flush() drains and resets the arena side via defer — queue is empty
-    // regardless of whether the network POST succeeds.
-    // NOTE: flush() has no retry; a failed POST drops the batch silently.
     c.flush() catch {};
     try std.testing.expectEqual(@as(usize, 0), c.queue.pendingCount());
 }
 
 test "integration: PostHogClient init and deinit without network" {
-    const client = try PostHogClient.init(std.testing.allocator, .{
+    const client = try PostHogClient.init(std.testing.allocator, testIo(), .{
         .api_key = "phc_test",
         .enable_logging = false,
         .flush_interval_ms = 60_000,
@@ -414,7 +408,7 @@ test "integration: PostHogClient init and deinit without network" {
 }
 
 test "integration: capture is non-blocking (avg < 1ms per call for 1000 events)" {
-    const client = try PostHogClient.init(std.testing.allocator, .{
+    const client = try PostHogClient.init(std.testing.allocator, testIo(), .{
         .api_key = "phc_test",
         .enable_logging = false,
         .flush_interval_ms = 60_000,
@@ -424,15 +418,17 @@ test "integration: capture is non-blocking (avg < 1ms per call for 1000 events)"
     });
     defer client.deinit();
 
-    const start = std.time.nanoTimestamp();
+    const start = types.monotonicNs(client.io);
     for (0..1000) |_| {
         try client.capture(.{ .distinct_id = "u1", .event = "bench", .timestamp = 0 });
     }
-    const elapsed_ns = std.time.nanoTimestamp() - start;
+    const elapsed_ns = types.monotonicNs(client.io) - start;
     const avg_ns = @divFloor(elapsed_ns, 1000);
 
     // Valgrind instrumentation in memleak mode adds heavy runtime overhead.
-    const in_memleak_mode = std.posix.getenv("POSTHOG_MEMLEAK_MODE") != null;
+    // Zig 0.16 removed `std.posix.getenv` — read through the Threaded Io's Environ.
+    const env = std.Options.debug_threaded_io.?.environ.process_environ;
+    const in_memleak_mode = env.getPosix("POSTHOG_MEMLEAK_MODE") != null;
     const max_avg_ns: i128 = if (in_memleak_mode) 50_000_000 else 1_000_000;
     try std.testing.expect(avg_ns < max_avg_ns);
 }

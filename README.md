@@ -3,12 +3,12 @@
 [![ci](https://github.com/usezombie/posthog-zig/actions/workflows/ci.yml/badge.svg)](https://github.com/usezombie/posthog-zig/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/usezombie/posthog-zig/branch/main/graph/badge.svg)](https://codecov.io/gh/usezombie/posthog-zig)
 [![version](https://img.shields.io/github/v/tag/usezombie/posthog-zig?label=version&sort=semver)](https://github.com/usezombie/posthog-zig/tags)
-[![zig](https://img.shields.io/badge/zig-0.15.x%20%7C%200.16.x-orange)](https://ziglang.org)
+[![zig](https://img.shields.io/badge/zig-0.16.x-orange)](https://ziglang.org)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 A server-side PostHog analytics client for Zig. Non-blocking event capture with background batch delivery, retry, and graceful shutdown.
 
-**Zig:** 0.15.x today · 0.16.x migration in progress — see [`docs/MIGRATION_ZIG_0_16.md`](docs/MIGRATION_ZIG_0_16.md)
+**Zig:** 0.16.x — see [`docs/MIGRATION_ZIG_0_16.md`](docs/MIGRATION_ZIG_0_16.md) for the 0.15.2 → 0.16.0 migration notes
 **PostHog API:** `/batch/` (capture) + `/decide/` v3 (feature flags)
 
 ---
@@ -70,7 +70,11 @@ const posthog = @import("posthog");
 
 // Init — heap-allocates client, spawns background flush thread.
 // Heap allocation ensures &client.queue is a stable address for the flush thread.
-const client = try posthog.init(allocator, .{
+//
+// Zig 0.16 threads `std.Io` through every concurrency primitive. Pass
+// `posthog.defaultIo()` to use the process-wide Io, or your own Io.Threaded
+// instance if you want control over concurrency policy.
+const client = try posthog.init(allocator, posthog.defaultIo(), .{
     .api_key = "phc_...",
     .host = "https://us.i.posthog.com", // default
     .enable_logging = true,              // default
@@ -155,8 +159,10 @@ pub fn main() !void {
 
     // Init — spawns background flush thread.
     // Pass null api_key to disable analytics (e.g. when env var is absent).
-    if (std.posix.getenv("POSTHOG_API_KEY")) |key| {
-        ph_client = try posthog.init(allocator, .{ .api_key = key });
+    // 0.16: std.posix.getenv was removed; read via the Threaded Io's Environ.
+    const env = std.Options.debug_threaded_io.?.environ.process_environ;
+    if (env.getPosix("POSTHOG_API_KEY")) |key| {
+        ph_client = try posthog.init(allocator, posthog.defaultIo(), .{ .api_key = key });
     }
     defer if (ph_client) |c| c.deinit(); // deinit frees the heap-allocated client // drains queue on SIGTERM / clean exit
 
