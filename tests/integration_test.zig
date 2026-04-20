@@ -119,28 +119,38 @@ test "integration: on_deliver callback fires on successful delivery" {
     const api_key = try getApiKey(allocator);
     defer allocator.free(api_key);
 
+    // `on_deliver` fires from the background flush thread, not from the
+    // synchronous `client.flush()` path. Use flush_at=1 so enqueue triggers
+    // an immediate background flush, then wait for the callback.
     var client = try posthog.init(allocator, posthog.defaultIo(), .{
         .api_key = api_key,
         .flush_interval_ms = 60_000,
+        .flush_at = 1,
         .max_retries = 1,
         .on_deliver = struct {
             fn cb(status: posthog.DeliveryStatus, count: usize) void {
                 _ = count;
                 if (status == .delivered) {
-                    delivered_count.fetchAdd(1, .acq_rel);
+                    _ = delivered_count.fetchAdd(1, .acq_rel);
                 }
             }
         }.cb,
     });
     defer client.deinit();
 
+    delivered_count.store(0, .release);
+
     try client.capture(.{
         .distinct_id = "posthog-zig-integration-test",
         .event = "sdk_callback_test",
     });
 
-    try client.flush();
-    posthog.defaultIo().sleep(std.Io.Duration.fromMilliseconds(100), .awake) catch {};
+    // Poll up to 5s for the background thread to deliver and fire the callback.
+    const io = posthog.defaultIo();
+    var waited_ms: u64 = 0;
+    while (waited_ms < 5_000 and delivered_count.load(.acquire) == 0) : (waited_ms += 50) {
+        io.sleep(std.Io.Duration.fromMilliseconds(50), .awake) catch {};
+    }
 
     try std.testing.expect(delivered_count.load(.acquire) > 0);
 }
